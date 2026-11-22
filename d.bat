@@ -1,30 +1,19 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal
+if /i "%~1"=="init" goto init
+if /i "%~1"=="build" goto build
+if /i "%~1"=="up" goto up
+docker compose %*
+exit /b %errorlevel%
 
-REM Optional: project name isolation
-set COMPOSE_PROJECT_NAME=mailmm
-
-if "%1"=="init" (
-    echo --- Initializing mailmm project ---
-    docker compose down --volumes --remove-orphans
-    docker compose up -d --build
-
-    docker compose exec app php artisan key:generate
-    docker compose exec app php artisan migrate
-    docker compose exec app php artisan storage:link
-
-    echo --- Project mailmm initialized and running at http://localhost ---
-    exit /b
-)
-
-if "%1"=="up" (
-    echo --- Starting containers ---
-    docker compose up -d
-    exit /b
-)
-
-if "%1"=="down" (
-    echo --- Stopping containers ---
-    docker compose down
-    exit /b
-)
+:init
+docker run --rm -v "%CD%:/project" -w /project php:8.4-cli php deploy/init-env.php
+if errorlevel 1 exit /b 1
+:build
+docker compose build
+if errorlevel 1 exit /b 1
+:up
+docker compose run --rm --no-deps -T --entrypoint php smtp artisan mail:parse --check-limit
+if errorlevel 1 exit /b 1
+docker compose up -d
+exit /b %errorlevel%

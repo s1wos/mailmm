@@ -1,77 +1,201 @@
+x-runtime: &runtime
+  image: ${COMPOSE_PROJECT_NAME}-app:${MAILMM_TAG:-local}
+  pull_policy: never
+  environment: &app-env
+    APP_NAME: mailmm
+    APP_ENV: ${APP_ENV:-local}
+    APP_DEBUG: ${APP_DEBUG:-false}
+    APP_KEY: ${APP_KEY:?Initialize .env first}
+    APP_URL: ${APP_URL:-http://localhost:8080}
+    APP_LOCALE: ru
+    LOG_CHANNEL: stderr
+    LOG_LEVEL: ${LOG_LEVEL:-warning}
+    DB_CONNECTION: pgsql
+    DB_HOST: db
+    DB_PORT: 5432
+    DB_DATABASE: ${DB_DATABASE:-mailmm}
+    DB_USERNAME: ${DB_USERNAME:-mailmm}
+    DB_PASSWORD: ${DB_PASSWORD:?Initialize .env first}
+    MAILBOX_DOMAIN: ${MAILBOX_DOMAIN:-mailmm.test}
+    MX_HOST: ${MX_HOST:-mx.mailmm.test}
+    MAILBOX_MAX_MESSAGE_BYTES: ${MAILBOX_MAX_MESSAGE_BYTES-10485760}
+    SESSION_DRIVER: database
+    SESSION_LIFETIME: ${SESSION_LIFETIME:-1440}
+    SESSION_SECURE_COOKIE: ${SESSION_SECURE_COOKIE:-false}
+    CACHE_STORE: database
+    QUEUE_CONNECTION: database
+    BROADCAST_CONNECTION: reverb
+    REVERB_APP_ID: ${REVERB_APP_ID:-mailmm}
+    REVERB_APP_KEY: ${REVERB_APP_KEY:?Initialize .env first}
+    REVERB_APP_SECRET: ${REVERB_APP_SECRET:?Initialize .env first}
+    REVERB_HOST: reverb
+    REVERB_PORT: 8080
+    REVERB_SCHEME: http
+  volumes:
+    - attachments:/var/www/storage/app/private
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+  restart: unless-stopped
+
 services:
-    app:
-        build:
-            context: .
-        container_name: skorleep_app
-        ports:
-            - "9000:9000"
-        volumes:
-            - .:/var/www
-        depends_on:
-            - mysql
-        networks:
-            - skorleep_net
+  db:
+    image: postgres:18-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${PG_ADMIN_PASSWORD:?Initialize .env first}
+      POSTGRES_DB: ${DB_DATABASE:-mailmm}
+      MAILMM_DB_USER: ${DB_USERNAME:-mailmm}
+      MAILMM_DB_PASSWORD: ${DB_PASSWORD:?Initialize .env first}
+    volumes:
+      - database:/var/lib/postgresql
+      - ./deploy/postgres/init.sh:/docker-entrypoint-initdb.d/10-mailmm.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 30
 
-    reverb:
-        build:
-            context: .
-        container_name: skorleep_reverb
-        working_dir: /var/www
-        command: sh -c "php artisan reverb:start --host=0.0.0.0 --port=6001"
-        volumes:
-            - .:/var/www
-        ports:
-            - "6001:6001"
-        depends_on:
-            - app
-        networks:
-            - skorleep_net
+  migrate:
+    <<: *runtime
+    user: www-data
+    command: ["php", "artisan", "migrate", "--force"]
+    volumes: []
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
 
-    nginx:
-        image: nginx:alpine
-        container_name: skorleep_nginx
-        ports:
-            - "8080:80"
-        volumes:
-            - .:/var/www
-            - ./nginx/conf.d:/etc/nginx/conf.d
-        depends_on:
-            - app
-            - reverb
-        networks:
-            - skorleep_net
+  provision-smtp-lookup:
+    image: postgres:18-bookworm
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      PGHOST: db
+      PGUSER: postgres
+      PGDATABASE: ${DB_DATABASE:-mailmm}
+      PGPASSWORD: ${PG_ADMIN_PASSWORD:?Initialize .env first}
+      MAILMM_DB_USER: ${DB_USERNAME:-mailmm}
+      SMTP_LOOKUP_PASSWORD: ${SMTP_LOOKUP_PASSWORD:?Initialize .env first}
+    volumes:
+      - ./deploy/postgres/provision-smtp-lookup.sh:/provision-smtp-lookup.sh:ro
+    entrypoint: ["sh", "/provision-smtp-lookup.sh"]
+    restart: "no"
 
-    mysql:
-        image: mysql:8.0
-        container_name: skorleep_db
-        restart: always
-        environment:
-            MYSQL_DATABASE: skorleep
-            MYSQL_ROOT_PASSWORD: root
-            MYSQL_USER: laravel
-            MYSQL_PASSWORD: secret
-        ports:
-            - "3306:3306"
-        volumes:
-            - mysql_data:/var/lib/mysql
-        networks:
-            - skorleep_net
+  app:
+    <<: *runtime
+    build:
+      context: .
+      target: app
 
-    vite:
-        image: node:22-alpine
-        container_name: skorleep_vite
-        working_dir: /var/www
-        command: sh -c "npm install && npm run dev"
-        volumes:
-            - .:/var/www
-        ports:
-            - "5173:5173"
-        networks:
-            - skorleep_net
+  reverb:
+    <<: *runtime
+    user: www-data
+    command: ["php", "artisan", "reverb:start", "--host=0.0.0.0", "--port=8080"]
+    healthcheck:
+      test: ["CMD", "php", "-r", "exit(@file_get_contents('http://127.0.0.1:8080/up') === false ? 1 : 0);"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
-volumes:
-    mysql_data:
+  worker:
+    <<: *runtime
+    user: www-data
+    command: ["php", "artisan", "queue:work", "--sleep=1", "--tries=5", "--backoff=5"]
+
+  log-reader:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    networks: [log-collection]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    volumes:
+      - type: bind
+        source: ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}
+        target: /var/run/docker.sock
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./deploy/log-reader/nginx.conf.template:/log-reader.conf.template:ro
+    environment:
+      MAILMM_PROJECT: ${COMPOSE_PROJECT_NAME}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        envsubst '$$MAILMM_PROJECT' < /log-reader.conf.template > /tmp/nginx.conf
+        exec nginx -c /tmp/nginx.conf -g 'daemon off;'
+
+  log-collector:
+    <<: *runtime
+    user: www-data
+    volumes: []
+    networks: [default, log-collection]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      log-reader:
+        condition: service_started
+    command: ["php", "artisan", "logs:collect"]
+
+  scheduler:
+    <<: *runtime
+    user: www-data
+    command: ["php", "artisan", "schedule:work"]
+
+  smtp:
+    <<: *runtime
+    image: ${COMPOSE_PROJECT_NAME}-smtp:${MAILMM_TAG:-local}
+    build:
+      context: .
+      target: smtp
+    environment:
+      <<: *app-env
+      MX_PREVIOUS_HOSTS: ${MX_PREVIOUS_HOSTS:-}
+      SMTP_LOOKUP_PASSWORD: ${SMTP_LOOKUP_PASSWORD:?Initialize .env first}
+    depends_on:
+      provision-smtp-lookup:
+        condition: service_completed_successfully
+    volumes:
+      - attachments:/var/www/storage/app/private
+      - spool:/var/spool/postfix
+    ports:
+      - "${SMTP_BIND:-127.0.0.1:2525}:25"
+
+  nginx:
+    image: ${COMPOSE_PROJECT_NAME}-web:${MAILMM_TAG:-local}
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
+      reverb:
+        condition: service_healthy
+    volumes:
+      - challenges:/var/www/acme:ro
+    ports:
+      - "${HTTP_BIND:-127.0.0.1:8080}:80"
+
+  certbot:
+    image: certbot/certbot:latest
+    profiles: [acme]
+    volumes:
+      - certificates:/etc/letsencrypt
+      - challenges:/var/www/acme
 
 networks:
-    skorleep_net:
-        driver: bridge
+  log-collection:
+    internal: true
+
+volumes:
+  database:
+  attachments:
+  spool:
+  certificates:
+  challenges:

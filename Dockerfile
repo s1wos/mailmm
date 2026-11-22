@@ -1,30 +1,46 @@
-FROM php:8.2-fpm
+FROM node:24-bookworm-slim AS assets
+WORKDIR /src
+COPY package*.json ./
+RUN npm ci
+COPY vite.config.ts tsconfig.json ./
+COPY resources ./resources
+RUN npm run build
 
-# Установка зависимостей
-RUN apt-get update && apt-get install -y \
-    build-essential libpng-dev libjpeg-dev libonig-dev libxml2-dev zip unzip git curl \
-    libzip-dev libpq-dev libmcrypt-dev libssl-dev gnupg \
-    && docker-php-ext-install pdo pdo_mysql mbstring exif pcntl bcmath gd zip
-
-# Установка Node.js 20 и npm
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
-    && npm install -g npm
-
-# Установка Composer
-COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
-
-# Рабочая директория
+FROM php:8.4-fpm-bookworm AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libpq-dev unzip \
+    && docker-php-ext-install -j"$(nproc)" pdo_pgsql pcntl \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer
 WORKDIR /var/www
+COPY composer.json composer.lock ./
+RUN composer install --no-dev --no-interaction --prefer-dist --no-scripts --no-autoloader
+COPY artisan ./
+COPY app ./app
+COPY bootstrap ./bootstrap
+COPY config ./config
+COPY database ./database
+COPY public ./public
+COPY resources/views ./resources/views
+COPY routes ./routes
+RUN mkdir -p bootstrap/cache storage/app/private storage/app/public storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs \
+    && composer dump-autoload --no-dev --optimize --no-interaction \
+    && chown -R www-data:www-data storage bootstrap/cache
+COPY --from=assets /src/public/build /var/www/public/build
 
-# Копируем проект
-COPY . .
+FROM runtime AS smtp
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends postfix postfix-pgsql ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY deploy/postfix/start.sh /usr/local/bin/mailmm-postfix
+ENTRYPOINT ["sh", "/usr/local/bin/mailmm-postfix"]
 
-# Установка зависимостей Laravel
-RUN composer install --no-interaction --prefer-dist --optimize-autoloader
+FROM nginx:stable-alpine AS web
+COPY nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf
+COPY nginx/upstreams.conf /etc/nginx/conf.d/mailmm-upstreams.conf
+COPY nginx/mailmm-locations.conf /etc/nginx/mailmm/locations.conf
+COPY nginx/https.conf /etc/nginx/mailmm/https.conf
+COPY --from=runtime /var/www/public /var/www/public
 
-# Доступ к storage и bootstrap/cache
-RUN chmod -R 777 storage bootstrap/cache
-
-EXPOSE 9000
+FROM runtime AS app
 CMD ["php-fpm"]

@@ -1,0 +1,15 @@
+[Unit]
+Description=Renew the MailMM certificate and reload its services
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mailmm/current
+StateDirectory=mailmm-cert-renew
+StateDirectoryMode=0700
+UMask=0077
+ExecStart=/bin/sh /usr/local/sbin/mailmm-cert-renew
+Restart=on-failure
+RestartSec=1h
+TimeoutStartSec=1h

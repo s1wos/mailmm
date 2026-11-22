@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+project=/opt/mailmm/current
+state=${STATE_DIRECTORY:?Start mailmm-cert-renew.service to provide its state directory}
+
+compose() {
+    docker compose --project-name mailmm --project-directory "$project" \
+        -f "$project/docker-compose.yml" -f "$project/docker-compose.tls.yml" "$@"
+}
+
+status=0
+compose --profile acme run --rm --no-deps -T \
+    -v "$state:/renew-state" certbot renew --cert-name mailmm --non-interactive --quiet \
+    --deploy-hook 'touch /renew-state/nginx.pending /renew-state/postfix.pending' || status=$?
+
+# Keep each marker until its service has accepted the new certificate configuration.
+if [ -f "$state/nginx.pending" ]; then
+    if compose exec -T nginx nginx -t && compose exec -T nginx nginx -s reload; then
+        rm "$state/nginx.pending"
+    else
+        echo 'MailMM certificate reload failed for nginx. A retry is pending.' >&2
+        status=1
+    fi
+fi
+if [ -f "$state/postfix.pending" ]; then
+    if compose exec -T smtp postfix reload; then
+        rm "$state/postfix.pending"
+    else
+        echo 'MailMM certificate reload failed for postfix. A retry is pending.' >&2
+        status=1
+    fi
+fi
+exit "$status"

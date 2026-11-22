@@ -1,0 +1,39 @@
+user root;
+worker_processes 1;
+master_process off;
+pid /tmp/nginx.pid;
+error_log stderr warn;
+events { worker_connections 64; }
+http {
+    access_log off;
+    client_body_temp_path /tmp/client;
+    proxy_temp_path /tmp/proxy;
+    fastcgi_temp_path /tmp/fastcgi;
+    uwsgi_temp_path /tmp/uwsgi;
+    scgi_temp_path /tmp/scgi;
+    upstream engine { server unix:/var/run/docker.sock; }
+    map $args $log_window {
+        default "";
+        "tail=0" "tail=0";
+        "~^since=[0-9]+&until=[0-9]+$" $args;
+        "~^since=[0-9]+&follow=1$" $args;
+    }
+    server {
+        listen 8080;
+        if ($request_method != GET) { return 405; }
+        proxy_pass_request_body off;
+        proxy_pass_request_headers off;
+        proxy_set_header Content-Length "";
+        proxy_buffering off;
+        proxy_read_timeout 24h;
+
+        location = /containers {
+            proxy_pass http://engine/containers/json?all=1&filters=%7B%22label%22%3A%5B%22com.docker.compose.project%3D${MAILMM_PROJECT}%22%5D%7D;
+        }
+        location ~ ^/logs/(?<service>app|worker|scheduler|reverb|migrate|smtp|nginx)/(?<replica>[1-9][0-9]*)$ {
+            if ($log_window = "") { return 400; }
+            proxy_pass http://engine/containers/${MAILMM_PROJECT}-$service-$replica/logs?stdout=1&stderr=1&timestamps=1&$log_window;
+        }
+        location / { return 404; }
+    }
+}
