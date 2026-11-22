@@ -1,0 +1,18 @@
+@import '@fontsource-variable/inter/standard.css';
+
+:root {
+    color-scheme: light;
+    --mm-font: 'Inter Variable', Inter, system-ui, sans-serif;
+    --mm-bg: #e9ebfa;
+    --mm-canvas: #f8f9fd;
+    --mm-surface: #fff;
+    --mm-ink: #20243a;
+    --mm-muted: #575e76;
+    --mm-line: #e6e8f2;
+    --mm-primary: #6051df;
+    --mm-primary-soft: #eeebff;
+    --mm-secondary: #aaa2f8;
+    --mm-focus: #4d41bc;
+    font-family: var(--mm-font);
+    font-synthesis: none;
+}

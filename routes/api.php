@@ -1,19 +1,19 @@
 <?php
 
-use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\EmailController;
 use App\Http\Controllers\Api\MessageController;
-use Illuminate\Session\Middleware\StartSession;
+use App\Http\Middleware\AddPanelUrl;
+use App\Http\Middleware\LimitRepeatedAction;
+use App\Http\Middleware\ThrottleOrdinaryUser;
+use Illuminate\Support\Facades\Route;
 
-Route::middleware(['api', StartSession::class])->group(function () {
-    // создание email с лимитом
-    Route::post('/emails', [EmailController::class, 'store'])
-        ->middleware('throttle:10,60');
+Route::get('/email', [EmailController::class, 'show'])->middleware(AddPanelUrl::class);
+Route::get('/email/options', [EmailController::class, 'options'])->middleware(LimitRepeatedAction::class.':options');
+Route::post('/emails', [EmailController::class, 'store'])->middleware(AddPanelUrl::class);
+Route::delete('/email', [EmailController::class, 'destroy'])->middleware(ThrottleOrdinaryUser::class.':10,60,mailbox-close:');
+Route::get('/messages', [MessageController::class, 'index'])->middleware(LimitRepeatedAction::class.':page');
+Route::get('/messages/{message}', [MessageController::class, 'show'])->whereNumber('message')->middleware(LimitRepeatedAction::class.':letter');
+Route::get('/messages/{message}/attachments/{index}', [MessageController::class, 'attachment'])
+    ->whereNumber(['message', 'index'])->name('mailbox.attachment');
 
-    // получение или создание email для сессии
-    Route::get('/email', [EmailController::class, 'getOrCreateEmail']);
-
-    // список писем и удаление ящика работают через email_id в сессии
-    Route::get('/messages', [MessageController::class, 'index']);
-    Route::delete('/email', [EmailController::class, 'destroy']);
-}); 
+require __DIR__.'/channels.php';

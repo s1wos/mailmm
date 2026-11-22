@@ -2,95 +2,78 @@
 
 namespace App\Console\Commands;
 
-use App\Models\Email;
-use App\Models\Message;
-use App\Services\MailParserService;
+use App\DTO\PostfixReceipt;
+use App\Models\MailboxDomain;
+use App\Services\MailDeliveryService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
-use App\Events\NewMessageReceived;
-use Illuminate\Support\Facades\Storage;
+use RuntimeException;
+use Symfony\Component\Console\Input\StreamableInputInterface;
 use Throwable;
 
 class ParseIncomingMail extends Command
 {
-    /**
-     * The name and signature of the console command.
-     *
-     * @var string
-     */
-    protected $signature = 'mail:parse';
+    protected $signature = 'mail:parse {--recipient= : Actual envelope recipient supplied by the SMTP transport}
+        {--postfix : Deliver from the size-checked local Postfix queue using its acceptance time}
+        {--check-limit : Validate and print the configured SMTP intake limit in bytes}';
 
-    /**
-     * The console command description.
-     *
-     * @var string
-     */
-    protected $description = 'Parse incoming email from STDIN and save to database';
+    protected $description = 'Deliver a single RFC 5322 message from STDIN';
 
-    public function __construct(private readonly MailParserService $parser)
+    public function handle(MailDeliveryService $delivery): int
     {
-        parent::__construct();
-    }
-
-    /**
-     * Execute the console command.
-     */
-    public function handle(): int
-    {
-        $rawEmail = stream_get_contents(STDIN);
-
-        if (empty($rawEmail)) {
-            $this->warn('No input received.');
-            return self::FAILURE;
-        }
-
         try {
-            $parsed = $this->parser->parse($rawEmail);
-        } catch (Throwable $e) {
-            Log::error('Failed to parse email', ['exception' => $e]);
-            $this->error('Failed to parse email: ' . $e->getMessage());
-            return self::FAILURE;
-        }
+            $fromSpool = $this->option('postfix');
+            $limit = null;
+            if (! $fromSpool || $this->option('check-limit')) {
+                $value = config('mailbox.max_message_bytes');
+                $digits = is_int($value) || is_string($value) ? (string) $value : '';
+                $limit = ctype_digit($digits) ? filter_var(ltrim($digits, '0'), FILTER_VALIDATE_INT, [
+                    'options' => ['min_range' => 1, 'max_range' => PHP_INT_MAX - 1],
+                ]) : false;
+                if ($limit === false) {
+                    $this->error('Invalid MAILBOX_MAX_MESSAGE_BYTES. Set a positive decimal byte count.');
 
-        $matchedEmails = Email::query()->whereIn('email', $parsed->to)->get();
-
-        if ($matchedEmails->isEmpty()) {
-            $this->info('No matching temporary email found, skipping.');
-            return self::SUCCESS;
-        }
-
-        foreach ($matchedEmails as $emailModel) {
-            $message = Message::create([
-                'email_id' => $emailModel->id,
-                'from' => $parsed->from,
-                'subject' => $parsed->subject,
-                'body_text' => $parsed->bodyText,
-                'body_html' => $parsed->bodyHtml,
-                'received_at' => $parsed->receivedAt,
-            ]);
-
-            if (!empty($parsed->attachments)) {
-                $meta = [];
-                foreach ($parsed->attachments as $att) {
-                    $path = "emails/$message->id/" . $att['filename'];
-                    Storage::disk('public')->put($path, $att['content']);
-
-                    $meta[] = [
-                        'filename' => $att['filename'],
-                        'path' => $path,
-                        'mime' => $att['mime'],
-                        'size' => $att['size'],
-                    ];
+                    return 75;
                 }
+                if ($this->option('check-limit')) {
+                    $this->line((string) $limit);
 
-                $message->update(['attachments' => $meta]);
+                    return self::SUCCESS;
+                }
             }
 
-            // Передаём событие реальному времени
-            event(new NewMessageReceived($emailModel->email, $message->toArray()));
-        }
+            $recipient = strtolower((string) $this->option('recipient'));
+            $separator = strrpos($recipient, '@');
+            if (! $separator || strlen($recipient) > 254 || preg_match('/[\x00-\x1f\x7f]/', $recipient)
+                || ! MailboxDomain::where('name', substr($recipient, $separator + 1))->exists()) {
+                $this->error('5.1.1 Invalid envelope recipient for this mail domain.');
 
-        $this->info('Email processed and stored successfully.');
+                return 67;
+            }
+
+            $stream = $this->input instanceof StreamableInputInterface ? $this->input->getStream() : null;
+            $raw = stream_get_contents($stream ?? STDIN, $limit === null ? null : $limit + 1);
+            if ($raw === false) {
+                throw new RuntimeException('Unable to read incoming mail.');
+            }
+            if ($raw === '' || ($limit !== null && strlen($raw) > $limit)) {
+                $this->error('5.3.4 Message is empty or exceeds the configured size limit.');
+
+                return 65;
+            }
+            $receipt = $fromSpool
+                ? PostfixReceipt::fromMessage($raw, config('mailbox.mx_host'), config('mailbox.previous_mx_hosts'))
+                : null;
+            $delivery->deliver($recipient, $raw, $receipt);
+        } catch (Throwable $exception) {
+            rescue(fn () => Log::error('Temporary inbound mail delivery failure.', [
+                'exception_type' => $exception::class,
+                'code' => $exception->getCode(),
+            ]), report: false);
+            $this->error('4.3.0 Temporary mail delivery failure.');
+
+            return 75;
+        }
 
         return self::SUCCESS;
     }

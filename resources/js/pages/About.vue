@@ -1,33 +1,24 @@
-<template>
-  <motion.div :initial="'hidden'" :while-in-view="'visible'" class="container mx-auto py-10 px-4 sm:px-6 lg:px-8">
-    <motion.div :variants="variants" :transition="transition" class="w-full p-4 bg-white rounded-xl shadow-md">
-      <h1 class="text-xl sm:text-2xl md:text-3xl px-2 sm:px-4 font-semibold flex items-center gap-3 sm:gap-4">
-        <FaRegClone class="w-6 h-6 sm:w-7 sm:h-7 md:w-8 md:h-8 text-indigo-400" />
-        О нас
-      </h1>
-      <div class="text-base sm:text-lg md:text-xl lg:text-2xl px-2 sm:px-4 py-4 max-w-5xl">
-        Наш сервис позволяет вам моментально получить временный e-mail для одноразового использования. Это удобно для регистрации на сайтах, получения писем и защиты от спама. Все просто, быстро и без лишних данных.
-      </div>
-    </motion.div>
-  </motion.div>
-</template>
-
 <script setup lang="ts">
-import { motion, cubicBezier} from 'motion-v'
-import { FaRegClone } from '@kalimahapps/vue-icons';
-
-const transition = { duration: 1, ease: cubicBezier(0.25, 0.1, 0.25, 1) }
-
-const variants = {
-  hidden: {
-    filter: 'blur(10px)',
-    transform: 'translateY(15%)',
-    opacity: 0
-  },
-  visible: {
-    filter: 'blur(0)',
-    transform: 'translateY(0)',
-    opacity: 1
-  }
-}
+import { Archive, ArrowRight, Clock3, KeyRound } from '@lucide/vue'
 </script>
+
+<template>
+    <article class="info-page">
+        <header class="page-heading"><div><h1>О сервисе</h1><p>Как устроены доступ к ящику и хранение писем в mailmm.</p></div></header>
+        <div class="about-grid">
+            <section class="info-card">
+                <span class="info-icon"><Clock3 aria-hidden="true" /></span><h2>Временный адрес</h2>
+                <p>Адрес выдаётся при первом открытии почты и действует 24 часа в том же браузере. Смена адреса сразу закрывает доступ к прежним письмам.</p>
+                <RouterLink class="text-btn" to="/">Открыть почту <ArrowRight aria-hidden="true" /></RouterLink>
+            </section>
+            <section class="info-card">
+                <span class="info-icon"><KeyRound aria-hidden="true" /></span><h2>Постоянный ящик</h2>
+                <p>Администратор выдаёт бессрочный адрес. Владелец может читать письма с разных устройств.</p>
+            </section>
+            <section class="info-card info-wide">
+                <span class="info-icon"><Archive aria-hidden="true" /></span><h2>Хранение писем</h2>
+                <p>Письма и вложения хранятся на сервере 365 дней с момента получения. Этот срок действует для временных и бессрочных ящиков.</p>
+            </section>
+        </div>
+    </article>
+</template>

@@ -5,34 +5,25 @@ namespace App\Http\Resources;
 use App\Models\Message;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
-use Illuminate\Support\Facades\Storage;
 
-/**
- * @mixin Message
- */
+/** @mixin Message */
 class MessageResource extends JsonResource
 {
-    /**
-     * Transform the resource into an array.
-     *
-     * @param  Request  $request
-     * @return array<string, mixed>
-     */
-    public function toArray($request): array
+    public function toArray(Request $request): array
     {
         return [
+            'id' => $this->id,
             'from' => $this->from,
             'subject' => $this->subject,
-            'body_text' => $this->body_text,
-            'received_at' => $this->received_at?->toIso8601String(),
-            'attachments' => collect($this->attachments)->map(function ($item) {
-                return [
-                    'filename' => $item['filename'] ?? null,
-                    'url' => $item['path'] ? Storage::disk('public')->url($item['path']) : null,
-                    'mime' => $item['mime'] ?? null,
-                    'size' => $item['size'] ?? null,
-                ];
-            }),
+            'body_text' => $this->resource->readableBody(),
+            'received_at' => $this->received_at->toISOString(),
+            'expires_at' => Message::expiresAt($this->received_at)->toISOString(),
+            'attachments' => collect($this->attachments)->map(fn (array $file, int $index) => [
+                'filename' => $file['filename'],
+                'url' => route('mailbox.attachment', [$this->id, $index], false),
+                'mime' => $file['mime'],
+                'size' => $file['size'],
+            ])->values(),
         ];
     }
 }

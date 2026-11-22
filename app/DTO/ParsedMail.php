@@ -2,18 +2,14 @@
 
 namespace App\DTO;
 
-use Carbon\CarbonInterface;
-
-class ParsedMail
+readonly class ParsedMail
 {
+    /** @param list<array{filename: string, mime: string, content: string}> $attachments */
     public function __construct(
-        public readonly string $from,
-        public readonly array $to,
-        public readonly ?string $subject,
-        public readonly ?string $bodyText,
-        public readonly ?string $bodyHtml,
-        public readonly CarbonInterface $receivedAt,
-        public readonly array $attachments = [],
-    ) {
-    }
-} 
+        public string $from,
+        public ?string $subject,
+        public ?string $bodyText,
+        public ?string $bodyHtml,
+        public array $attachments,
+    ) {}
+}

@@ -1,226 +1,118 @@
+<script setup lang="ts">
+import { computed, nextTick, ref } from 'vue'
+import { Check, ChevronDown, Inbox, Mail, MailOpen, Paperclip, RefreshCw } from '@lucide/vue'
+import { useMailboxSync } from '../useMailboxSync'
+import { useEmailStore } from '../stores/emailStore'
+import AddressCard from '../components/AddressCard.vue'
+import MessageReader from '../components/MessageReader.vue'
+import MailboxWarning from '../components/MailboxWarning.vue'
+
+const store = useEmailStore()
+const { now, online, guard, manualCheck, manualDisabled, refreshWarning, statusText, checkMail } = useMailboxSync(store)
+const inboxTitle = ref<HTMLElement | null>(null)
+const selected = computed(() => store.messages.find(m => m.id === store.selectedId))
+const shortDate = new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'short' })
+const time = new Intl.DateTimeFormat('ru', { hour: '2-digit', minute: '2-digit' })
+const today = new Intl.DateTimeFormat('ru', { weekday: 'long', day: 'numeric', month: 'long' })
+const messageDate = (value: string) => {
+    const received = new Date(value)
+    return received.toDateString() === new Date(now.value).toDateString() ? time.format(received) : shortDate.format(received)
+}
+async function openMessage(id: number) {
+    const action = guard.run('open:' + id, 1000, () => store.openMessage(id))
+    if (!action) return
+    await nextTick()
+    document.getElementById('letter-subject')?.focus()
+}
+async function back() {
+    const id = store.selectedId
+    if (!guard.run('back:' + id, 300, () => { store.closeMessage(); return true })) return
+    await nextTick()
+    const row = document.getElementById('letter-' + id) ?? inboxTitle.value
+    row?.focus()
+}
+
+async function loadMore() {
+    const lastId = store.messages.at(-1)?.id
+    const action = guard.run('more:' + store.nextCursor, 1000, () => store.loadMore())
+    if (!action) return
+    await action
+    const previous = store.messages.findIndex(message => message.id === lastId)
+    const firstNew = previous >= 0 ? store.messages[previous + 1] : undefined
+    if (!firstNew) return
+    await nextTick()
+    document.getElementById('letter-' + firstNew.id)?.focus()
+}
+
+</script>
+
 <template>
-  <motion.div
-    :initial="'hidden'"
-    :while-in-view="'visible'"
-    class="container w-full h-full py-4 px-4 sm:px-2 sm:py-10 lg:px-8  flex flex-col lg:flex-row bg-[#F9FAFE] gap-6 lg:gap-8 justify-center overflow-hidden"
-  >
-    <!-- Left panel: Email controls -->
-    <motion.div
-      :variants="variants"
-      :transition="transition"
-      class="w-full lg:w-1/2 h-full lg:max-h-[50%] sm:max-h-[50%] flex-1 bg-transparent"
-    >
-      <!-- Email display -->
-      <div class="w-full h-52 p-4 flex-1 bg-white rounded-xl">
-        <input
-          v-model="emailStore.email"
-          class="w-full h-16 p-4 bg-[#F9FAFE] rounded-xl outline-none text-xl sm:text-2xl text-gray-500"
-          readonly
-        />
-        <div class="flex flex-wrap gap-4 py-6 justify-between">
-          <motion.button
-            @click="handleCopy"
-            :whileHover="{ scale: [1, 1.04] }"
-            :transition="{ duration: 0.15, ease: 'easeOut' }"
-            type="button"
-            class="text-white cursor-pointer bg-indigo-400 hover:bg-indigo-500 focus:ring-4 focus:ring-indigo-300
-              font-medium rounded-lg text-lg sm:text-2xl px-5 py-2.5 dark:hover:bg-indigo-600 focus:outline-none dark:focus:ring-indigo-800"
-          >
-            Копировать
-          </motion.button>
-          <motion.button
-            @click="emailStore.recreateEmail"
-            type="button"
-            class="flex items-center cursor-pointer gap-2 font-medium text-lg sm:text-2xl px-5 py-2.5 bg-transparent"
-            :initial="'rest'"
-            whileHover="hover"
-            :variants="{
-              rest:  { scale: 1 },
-              hover: { scale: 1.04 }
-            }"
-            :transition="{ duration: 0.15, ease: 'easeOut' }"
-          >
-            <motion.div
-              class="w-8 h-8 cursor-pointer sm:w-12 sm:h-12 text-indigo-400 pointer-events-none"
-              :variants="{
-                rest:  { rotate: 0 },
-                hover: {
-                  rotate: [0, 360],
-                  transition: { duration: 0.8, repeat: Infinity, ease: 'linear' }
-                }
-              }"
-            >
-              <AnOutlinedReload class="w-full h-full" />
-            </motion.div>
-
-            Обновить
-          </motion.button>
-        </div>
-      </div>
-
-      <!-- Inbox messages -->
-      <div class="w-full flex-1 mt-6">
-        <div class="flex flex-row justify-between mt-4 p-1">
-          <p class="font-medium text-2xl sm:text-3xl">Входящие</p>
-          <button @click="isAscending = !isAscending" class="cursor-pointer">
-            <CaArrowsHorizontal class="w-8 h-8 sm:w-10 sm:h-10 hover:text-gray-600" />
-          </button>
-        </div>
-
-        <div
-          v-if="Array.isArray(emailStore.messages) && emailStore.messages.length === 0"
-          class="h-full flex text-base sm:text-xl text-gray-500 justify-center items-center"
-        >
-          У вас нет сообщений
-        </div>
-
-        <ul>
-          <li
-            v-for="msg in sortedMessages"
-            :key="msg.subject + msg.received_at"
-            @click="openMessage(msg)"
-            class="w-full flex gap-2 items-start bg-transparent hover:bg-white border-b border-gray-200 p-4 rounded-lg cursor-pointer"
-          >
-            <HeFilledUiUserProfile class="w-16 h-16 sm:w-20 sm:h-20 text-indigo-400" />
-            <div class="flex flex-col gap-1">
-              <div class="text-lg sm:text-xl font-medium">{{ msg.subject }}</div>
-              <div class="text-sm sm:text-lg text-gray-400">От: {{ msg.from }}</div>
+    <div class="mail-page" :class="{ 'reading-letter': selected }">
+        <header class="page-heading">
+            <div><h1>Моя почта</h1><p class="today">{{ today.format(now) }}</p></div>
+        </header>
+        <AddressCard :now="now" />
+        <section class="mail-section" aria-labelledby="inbox-title">
+            <div class="inbox-heading">
+                <h2 id="inbox-title" ref="inboxTitle" tabindex="-1">Входящие <span v-if="store.checkedAt" class="count">{{ store.messages.length }}{{ store.nextCursor ? '+' : '' }}</span></h2>
+                <button class="btn neutral-btn check-mail" type="button" :class="{ checked: manualCheck === 'checked' }"
+                    :disabled="manualDisabled" :aria-disabled="guard.blocked('check') || undefined"
+                    :aria-busy="manualCheck === 'checking'" @click="checkMail">
+                    <Check v-if="manualCheck === 'checked'" aria-hidden="true" />
+                    <RefreshCw v-else :class="{ spinning: manualCheck === 'checking' }" aria-hidden="true" />
+                    <span class="check-label">
+                        <span :class="{ 'sizing-label': manualCheck !== 'idle' }">Проверить почту</span>
+                        <span v-if="manualCheck !== 'idle'">{{ manualCheck === 'checking' ? 'Проверяем…' : 'Проверено' }}</span>
+                    </span>
+                </button>
             </div>
-            <div class="ms-auto text-xs sm:text-lg text-gray-400">
-              {{ new Date(msg.received_at).toLocaleString(undefined, { hour12: false }) }}
+            <MailboxWarning :message="refreshWarning" />
+            <div class="mail-surface">
+                <div v-if="!store.messages.length" class="empty-state">
+                    <div class="tray" aria-hidden="true"><span class="mail-tile mail-tile-back"></span><span class="mail-tile"><Mail /></span></div>
+                    <h3 v-if="!store.checkedAt && (store.loading || store.rotating)">Загружаем почту…</h3>
+                    <h3 v-else-if="!store.checkedAt && (store.error || !online)">Почта недоступна</h3>
+                    <h3 v-else>Писем пока нет</h3>
+                    <p v-if="store.checkedAt">Письма, отправленные на ваш адрес,<br>появятся здесь автоматически.</p>
+                </div>
+                <div v-else class="mail-panes">
+                    <div class="list-pane">
+                        <ul class="letter-list">
+                            <li v-for="message in store.messages" :key="message.id">
+                                <button :id="'letter-' + message.id" type="button" :class="{ chosen: selected?.id === message.id }"
+                                    :aria-disabled="guard.blocked('open:' + message.id) || undefined"
+                                    :aria-current="selected?.id === message.id ? 'true' : undefined" @click="openMessage(message.id)">
+                                    <span class="sender-initial" aria-hidden="true">{{ message.from?.trim().charAt(0).toLocaleUpperCase('ru') || '@' }}</span>
+                                    <span class="sender">{{ message.from || 'Отправитель не указан' }}</span>
+                                    <time :datetime="message.received_at">{{ messageDate(message.received_at) }}</time>
+                                    <span class="subject">{{ message.subject || 'Без темы' }} <Paperclip v-if="message.has_attachments" aria-label="Есть вложения" /></span>
+                                </button>
+                            </li>
+                        </ul>
+                        <MailboxWarning :message="store.moreError" />
+                        <button v-if="store.nextCursor" class="more-btn" type="button" :disabled="store.loadingMore || store.loading || store.checkingSocket" :aria-disabled="guard.blocked('more:' + store.nextCursor) || undefined" @click="loadMore">
+                            <ChevronDown /> {{ store.loadingMore ? 'Загружаем…' : 'Показать ещё' }}
+                        </button>
+                    </div>
+                    <MessageReader v-if="selected" :summary="selected" :message="store.detail" :error="store.detailError"
+                        @back="back" @retry="openMessage(selected.id)" />
+                    <div v-else class="reader-placeholder"><MailOpen aria-hidden="true" /><p>Выберите письмо для чтения</p></div>
+                </div>
+                <div class="mail-status">
+                    <span><Inbox aria-hidden="true" />{{ statusText }}</span>
+                    <span v-if="store.checkedAt"><span class="last-checked-label">Проверено </span>{{ time.format(store.checkedAt) }}</span>
+                </div>
+                <span class="visually-hidden" role="status">{{ manualCheck === 'checked' ? 'Почта проверена. ' : '' }}{{ store.checkedAt ? 'Загружено писем: ' + store.messages.length : '' }}</span>
             </div>
-          </li>
-        </ul>
-      </div>
-    </motion.div>
-
-    <!-- Right panel: Opened message -->
-    <motion.div
-      :variants="variants"
-      :transition="transition"
-      class="w-full lg:w-1/2 h-full flex-1 bg-white rounded-xl p-6 sm:p-8 box-border"
-    >
-      <div
-        v-if="selectedMessage"
-        class="flex flex-col items-start gap-4 h-full overflow-y-auto overflow-x-hidden"
-      >
-        <!-- Header -->
-        <div class="flex border-b border-gray-200 flex-row w-full pb-2">
-          <div class="flex gap-4 flex-col">
-            <h2 class="text-2xl sm:text-3xl font-medium">{{ selectedMessage.subject }}</h2>
-            <div class="text-lg sm:text-xl text-gray-500">От: {{ selectedMessage.from }}</div>
-          </div>
-          <div class="ms-auto text-sm sm:text-lg text-gray-500">
-            {{ new Date(selectedMessage.received_at).toLocaleString(undefined, { hour12: false }) }}
-          </div>
-        </div>
-
-        <!-- Message Body -->
-        <div class="border-b border-gray-200 w-full py-2">
-          <div class="text-base sm:text-lg">{{ selectedMessage.body_text }}</div>
-        </div>
-
-        <!-- Attachments -->
-        <div class="w-full pt-2">
-          <h4 class="text-base sm:text-lg font-medium">Вложения:</h4>
-          <ul class="space-y-1 flex flex-col gap-3">
-            <li
-              v-for="file in selectedMessage.attachments"
-              :key="file.url!"
-              class="w-full flex items-center text-sm bg-[#F9FAFE] rounded-b-lg p-2"
-            >
-              <FlDocumentText class="w-6 h-6 sm:w-8 sm:h-8 text-indigo-400" />
-              <a
-                v-if="file.url"
-                :href="file.url"
-                :download="file.filename ?? 'attachment'"
-                target="_blank"
-                class="text-indigo-400 underline mx-3 text-sm sm:text-lg"
-              >
-                {{ file.filename ?? 'Unknown file' }}
-              </a>
-              <span v-if="file.size !== null" class="text-gray-400 text-sm sm:text-lg ms-auto">
-                {{ (file.size / 1024).toFixed(1) }} KB
-              </span>
-            </li>
-            <div v-if="selectedMessage && selectedMessage.attachments?.length === 0">
-              В сообщение нет вложений
-            </div>
-          </ul>
-        </div>
-      </div>
-
-      <div
-        v-if="!selectedMessage"
-        class="h-full flex text-xl sm:text-2xl text-gray-500 justify-center items-center"
-      >
-        Выберите сообщение
-      </div>
-    </motion.div>
-  </motion.div>
+        </section>
+    </div>
 </template>
 
-
-<script setup lang="ts">
-import {useEmailStore} from '../stores/emailStore'
-import {computed, onMounted, ref} from 'vue'
-import { CgSpinner } from '@kalimahapps/vue-icons';
-import { CaArrowsHorizontal } from '@kalimahapps/vue-icons';
-import { HeFilledUiUserProfile } from '@kalimahapps/vue-icons';
-import { FlDocumentText } from '@kalimahapps/vue-icons';
-import { AnOutlinedReload } from '@kalimahapps/vue-icons';
-import { motion, cubicBezier } from 'motion-v'
-
-const isHovering = ref(false)
-
-const transition = { duration: 1, ease: cubicBezier(0.25, 0.1, 0.25, 1) }
-
-const variants = {
-  hidden: {
-    filter: 'blur(10px)',
-    transform: 'translateY(15%)',
-    opacity: 0
-  },
-  visible: {
-    filter: 'blur(0)',
-    transform: 'translateY(0)',
-    opacity: 1
-  }
-}
-
-const emailStore = useEmailStore()
-const selectedMessage = ref<EmailMessage | null>(null)
-const useMock = import.meta.env.VITE_USE_MOCK === 'false'
-const isAscending = ref(false)
-
-onMounted(() => {
-    if (useMock) {
-        emailStore.loadMockMessages()
-    } else {
-        const savedEmail = localStorage.getItem('tempEmail')
-        if (savedEmail) {
-            emailStore.email = savedEmail
-            emailStore.fetchMessages()
-        } else {
-            emailStore.recreateEmail()
-        }
-    }
-})
-
-const sortedMessages = computed(() => {
-    return Array.isArray(emailStore.messages) ? [...emailStore.messages].sort((a, b) => {
-        const timeA = new Date(a.received_at).getTime();
-        const timeB = new Date(b.received_at).getTime();
-        return isAscending.value ? timeA - timeB : timeB - timeA;
-    }) 
-    : []
-})
-
-function handleCopy() {
-    navigator.clipboard.writeText(emailStore.email)
-}
-
-function openMessage(msg: EmailMessage) {
-    selectedMessage.value = msg;
-}
-</script>
+<style scoped>
+.check-mail.btn:hover, .check-mail.btn:active { transform: none; }
+.check-mail[aria-busy="true"] { cursor: progress; }
+.check-mail.checked { color: var(--mm-primary); background: var(--mm-primary-soft); }
+.check-label { display: grid; }
+.check-label > span { grid-area: 1 / 1; }
+.sizing-label { visibility: hidden; }
+</style>

@@ -2,59 +2,49 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\NoIssuableDomains;
 use App\Http\Controllers\Controller;
 use App\Http\Resources\EmailResource;
-use App\Services\EmailGeneratorService;
-use App\Services\EmailDeletionService;
+use App\Services\MailboxDomainCatalog;
+use App\Services\MailboxSession;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use App\Models\Email;
 use Illuminate\Http\Response;
+use Illuminate\Validation\ValidationException;
 
 class EmailController extends Controller
 {
-    public function __construct(private readonly EmailGeneratorService $generator)
-    {
-    }
-    public function store(Request $request): EmailResource
-    {
-        $email = $this->generator->generate();
+    public function __construct(private readonly MailboxSession $mailboxes) {}
 
-        $request->session()->put('email_id', $email->id);
-
-        return new EmailResource($email);
+    public function show(Request $request): JsonResponse
+    {
+        return (new EmailResource($this->mailboxes->getOrCreate($request)))->response()->setStatusCode(200);
     }
 
-    /**
-     * Удаляет указанный временный email и связанные с ним письма.
-     */
-    public function destroy(Email $email, EmailDeletionService $deleter): Response
+    public function store(Request $request, MailboxDomainCatalog $catalog): EmailResource|JsonResponse
     {
-        // Middleware EnsureEmailInSession гарантировал, что у пользователя есть доступ
-        // Удаляем email и связанные письма
-        $deleter->delete($email);
-
-        // Возвращаем 204 No Content
-        return response()->noContent();
-    }
-
-    /**
-     * Вернуть email из сессии или создать новый, если его нет.
-     */
-    public function getOrCreateEmail(Request $request): JsonResponse
-    {
-        $emailId = $request->session()->get('email_id');
-
-        if ($emailId) {
-            $existing = Email::find($emailId);
-            if ($existing) {
-                return response()->json($existing);
-            }
+        try {
+            return new EmailResource($this->mailboxes->rotate($request));
+        } catch (ValidationException $error) {
+            return response()->json([
+                'message' => $error->getMessage(), 'errors' => $error->errors(), 'options' => $catalog->options(),
+            ], 422);
+        } catch (NoIssuableDomains $error) {
+            return response()->json([
+                'code' => 'no_issuable_domains', 'message' => $error->getMessage(), 'options' => $catalog->options(),
+            ], 503);
         }
+    }
 
-        $email = $this->generator->generate();
-        $request->session()->put('email_id', $email->id);
+    public function options(MailboxDomainCatalog $catalog): JsonResponse
+    {
+        return response()->json(['data' => $catalog->options()]);
+    }
 
-        return response()->json($email);
+    public function destroy(Request $request): Response
+    {
+        $this->mailboxes->close($request);
+
+        return response()->noContent();
     }
 }
