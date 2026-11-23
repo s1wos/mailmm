@@ -25,3 +25,21 @@
     margin-inline-end: 6px;
     background: url('../images/mailmm.svg?no-inline') center / contain no-repeat;
 }
+
+.icon-heading {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    text-align: start;
+    overflow-wrap: anywhere;
+}
+
+.icon-heading > svg {
+    flex: none;
+    width: 2.625rem;
+    height: 2.625rem;
+    padding: .75rem;
+    border-radius: .8125rem;
+    color: var(--mm-primary);
+    background: var(--mm-primary-soft);
+}

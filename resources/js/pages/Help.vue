@@ -18,6 +18,9 @@ const answers = [
                 <p>{{ answer }}</p>
             </details>
         </div>
-        <div class="support"><span class="info-icon"><MessagesSquare aria-hidden="true" /></span><h2>Остались вопросы?</h2><a class="btn neutral-btn" href="https://t.me/skorleep" target="_blank" rel="noopener noreferrer">Написать в Telegram <ArrowUpRight aria-hidden="true" /></a></div>
+        <div class="support">
+            <h2 class="icon-heading"><MessagesSquare aria-hidden="true" /> Остались вопросы?</h2>
+            <a class="btn neutral-btn" href="https://t.me/skorleep" target="_blank" rel="noopener noreferrer">Написать в Telegram <ArrowUpRight aria-hidden="true" /></a>
+        </div>
     </article>
 </template>

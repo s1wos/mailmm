@@ -32,11 +32,11 @@ test('a pending clipboard write for the previous address cannot lock or confirm 
     assert.deepEqual(card.writes.map(write => write.address), ['first@mail.test', 'second@mail.test'])
     card.writes[0].finish()
     await oldWrite
-    assert.doesNotMatch(await card.html(), /Скопировано/u)
+    assert.doesNotMatch(await card.html(), /Адрес скопирован/u)
     assert.equal(card.feedbackTimer.mock.callCount(), 0)
     card.writes[1].finish()
     await newWrite
-    assert.match(await card.html(), /Скопировано/u)
+    assert.match(await card.html(), /Адрес скопирован/u)
     assert.equal(card.feedbackTimer.mock.callCount(), 1)
 })
 

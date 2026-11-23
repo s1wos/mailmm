@@ -63,7 +63,7 @@ async function save(event: SubmitEvent, method: 'POST' | 'PATCH') {
             </form>
         </section>
         <section class="card form-card">
-            <span class="large-icon"><PanelIcon name="inbox" /></span><h2>Временные ящики</h2>
+            <h2 class="icon-heading"><PanelIcon name="inbox" /> Временные ящики</h2>
             <p class="description">Пауза остановит выдачу новых адресов. Уже выданные ящики продолжат получать почту до конца своего срока.</p>
             <form class="stack-form" method="post" :action="issuancePath" @submit.prevent="save($event, 'PATCH')">
                 <label class="toggle-field" for="guest-issuance">
@@ -80,7 +80,7 @@ async function save(event: SubmitEvent, method: 'POST' | 'PATCH') {
             </form>
         </section>
         <section class="card form-card">
-            <span class="large-icon"><PanelIcon name="shield-check" /></span><h2>Пароль администратора</h2>
+            <h2 class="icon-heading"><PanelIcon name="shield-check" /> Пароль администратора</h2>
             <p class="description">{{ page.user.email }}</p>
             <PanelPasswordForm action="/admin/settings/password" :form="panelForm" />
         </section>

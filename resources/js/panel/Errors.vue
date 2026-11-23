@@ -31,8 +31,7 @@ const timestamp = new Intl.DateTimeFormat('ru-RU', {
             </ul>
         </details>
         <div v-if="!page.entries.data.length && complete" class="empty-state">
-            <span class="empty-icon"><PanelIcon name="check" /></span>
-            <strong>Ошибок пока нет</strong>
+            <strong class="icon-heading"><PanelIcon name="check" /> Ошибок пока нет</strong>
         </div>
         <ul v-else-if="page.entries.data.length" class="table-list error-entries">
             <li v-for="entry in page.entries.data" :key="entry.id">

@@ -79,6 +79,29 @@ async function login(page, url, credentials) {
     await expect(page.getByRole('link', { name: 'Открыть почту' }).first()).toBeVisible()
 }
 
+test('the login and about cards keep each icon beside its heading', async ({ page, stack }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    for (const [path, cards, count] of [['/admin/login', '.login-form-block', 1], ['/about', '.info-card', 3]]) {
+        await page.goto(stack.url + path)
+        const sections = page.locator(cards)
+        await expect(sections).toHaveCount(count)
+        await page.evaluate(() => document.fonts.ready)
+        for (const width of [320, 1280]) {
+            await page.setViewportSize({ width, height: 800 })
+            for (const section of await sections.all()) {
+                const icon = await section.locator('svg').first().boundingBox()
+                const text = await section.getByRole('heading').evaluate(heading => {
+                    const range = document.createRange()
+                    range.selectNodeContents(heading.lastChild)
+                    return range.getBoundingClientRect().toJSON()
+                })
+                expect(icon.x + icon.width).toBeLessThan(text.left)
+                expect(Math.abs(icon.y + icon.height / 2 - (text.top + text.height / 2))).toBeLessThan(3)
+            }
+        }
+    }
+})
+
 test('the dashboard counts browsers with visible tabs and drops the last hidden tab', async ({ page, browser, stack }) => {
     await login(page, stack.url, stack.admin)
     const online = page.locator('.metric').filter({ hasText: 'Пользователи онлайн' }).locator('.metric-value')
@@ -365,7 +388,7 @@ test('an administrator can check and copy again immediately on the public mailbo
         Object.defineProperty(navigator, 'clipboard', { value: { writeText: async () => { window.copies++ } } })
     })
     await page.locator('.copy-btn').click()
-    await expect(page.locator('.copy-btn')).toHaveText('Скопировано')
+    await expect(page.locator('.copy-btn')).toHaveAccessibleName('Скопировано')
     await page.locator('.address-copy').evaluate(el => el.click())
     expect(await page.evaluate(() => window.copies)).toBe(2)
 })
@@ -1008,16 +1031,59 @@ test('both copy controls share one pending operation and keyboard activation wor
     await expect(confirmation).toBeVisible()
     expect(await burst()).toEqual([email])
     await expect(confirmation).toBeVisible()
-    await expect(page.locator('.copy-btn')).toHaveText('Скопировать')
+    await expect(page.locator('.copy-btn')).toHaveAccessibleName('Скопировать')
 
     await address.press('Shift+Tab')
     await page.keyboard.press('Tab')
     await expect(address).toBeFocused()
     await page.keyboard.press('Enter')
     await expect.poll(() => page.evaluate(() => window.writes)).toEqual([email, email])
-    await expect(page.locator('.copy-btn')).toHaveText('Скопировать')
+    await expect(page.locator('.copy-btn')).toHaveAccessibleName('Скопировать')
     await page.keyboard.press('Space')
     await expect.poll(() => page.evaluate(() => window.writes)).toEqual([email, email, email])
+})
+
+test('copy feedback animates in both directions while both address buttons stay in place', async ({ page, stack }) => {
+    await page.emulateMedia({ reducedMotion: 'no-preference' })
+    await page.context().grantPermissions(['clipboard-write'], { origin: stack.url })
+    await page.goto(stack.url)
+    const copy = page.locator('.copy-btn')
+    const change = page.getByRole('button', { name: 'Сменить адрес', exact: true })
+    const boxes = () => Promise.all([copy.boundingBox(), change.boundingBox()])
+    const finishMotion = element => Promise.all(element.getAnimations().map(animation => animation.finished))
+    await expect(copy).toBeEnabled()
+    await page.evaluate(() => document.fonts.ready)
+    await page.locator('.address-card').evaluate(finishMotion)
+    const initial = await boxes()
+
+    await page.getByRole('button', { name: /^Скопировать адрес / }).focus()
+    await page.keyboard.press('Tab')
+    await expect(copy).toBeFocused()
+    expect.soft(await copy.evaluate(button => getComputedStyle(button).outlineStyle)).toBe('none')
+    await copy.hover()
+    await copy.evaluate(finishMotion)
+    expect.soft(await boxes()).toEqual(initial)
+    await page.mouse.down()
+    await copy.evaluate(finishMotion)
+    expect.soft(await boxes()).toEqual(initial)
+
+    await copy.evaluate(button => {
+        window.animatedCopyLabels = new Set()
+        const record = event => {
+            if (event.elapsedTime > 0 && event.target !== button && (event.target.closest('svg') || event.target.querySelector('svg'))) {
+                window.animatedCopyLabels.add(button.innerText.trim())
+            }
+        }
+        button.addEventListener('transitionend', record)
+        button.addEventListener('animationend', record)
+    })
+    await page.mouse.up()
+    for (const label of ['Скопировано', 'Скопировать']) {
+        await expect(copy).toHaveAccessibleName(label)
+        await copy.evaluate(finishMotion)
+        expect.soft(await boxes()).toEqual(initial)
+    }
+    await expect.poll(() => page.evaluate(() => [...window.animatedCopyLabels])).toEqual(['Скопировано', 'Скопировать'])
 })
 
 test('the mailbox address alone is selected when copying requires the browser menu', async ({ page, stack }) => {
@@ -1059,6 +1125,43 @@ test('reopening the address dialog reuses the loaded domain choices', async ({ p
     expect(requests).toBe(1)
 })
 
+test('the address dialog can be dismissed without changing the mailbox', async ({ page, stack }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.goto(stack.url)
+    const address = page.locator('.address-value')
+    await expect(address).toHaveText(/@/)
+    const original = await address.textContent()
+    const rotations = []
+    page.on('request', request => {
+        if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/emails') rotations.push(request)
+    })
+    const open = page.getByRole('button', { name: 'Сменить адрес', exact: true })
+    const dialog = page.getByRole('dialog')
+    const cancel = dialog.getByRole('button', { name: 'Отмена', exact: true })
+    const close = dialog.getByRole('button', { name: /^Закрыть/ })
+
+    async function clickBackdrop() {
+        const box = await dialog.boundingBox()
+        await page.mouse.click(box.x + 4, box.y + box.height / 2)
+        await expect(dialog).toBeVisible()
+        await page.mouse.down()
+        await page.mouse.move(4, 4)
+        await page.mouse.up()
+        await expect(dialog).toBeVisible()
+        await page.mouse.click(4, 4)
+    }
+
+    for (const dismiss of [clickBackdrop, () => close.click(), () => cancel.click(), () => page.keyboard.press('Escape')]) {
+        await open.click()
+        await expect(cancel).toBeFocused()
+        await dismiss()
+        await expect(dialog).toBeHidden()
+        await expect(open).toBeFocused()
+    }
+    await expect(address).toHaveText(original)
+    expect(rotations).toHaveLength(0)
+})
+
 for (const width of [280, 1280]) {
     test(`the address change button stays in place at ${width}px while loading domains and changing the address`, async ({ page, stack }) => {
         await page.setViewportSize({ width, height: 800 })
@@ -1093,6 +1196,11 @@ for (const width of [280, 1280]) {
             await expect(pending).toBeDisabled()
             await pending.evaluate(finishAnimations)
             expect.soft(await pending.boundingBox()).toEqual(ready)
+            await expect(dialog.getByRole('button', { name: /^Закрыть/ })).toBeDisabled()
+            await expect(dialog.getByRole('button', { name: 'Отмена' })).toBeDisabled()
+            await page.mouse.click(4, 4)
+            await page.keyboard.press('Escape')
+            await expect(dialog).toBeVisible()
         } finally {
             options.resolve()
             rotation.resolve()

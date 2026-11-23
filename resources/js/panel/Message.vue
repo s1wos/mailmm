@@ -23,8 +23,7 @@ function returnToList(event: MouseEvent) {
         <PanelIcon name="arrow-left" />{{ page.user.is_admin && page.backUrl === '/admin' ? 'К обзору' : 'К списку писем' }}
     </RouterLink>
     <article class="card message-card">
-        <span class="large-icon"><PanelIcon name="mail" /></span>
-        <h1>{{ page.letter.subject || 'Без темы' }}</h1>
+        <h1 class="icon-heading"><PanelIcon name="mail" /> {{ page.letter.subject || 'Без темы' }}</h1>
         <dl class="detail-list">
             <div><dt>Отправитель</dt><dd>{{ page.letter.from || 'Не указан' }}</dd></div>
             <div><dt>Получатель</dt><dd>{{ page.letter.recipient }}</dd></div>

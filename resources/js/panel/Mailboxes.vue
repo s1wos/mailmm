@@ -82,13 +82,13 @@ async function issue(event: SubmitEvent, resetMailboxId?: number) {
                     <MailboxCredentials v-if="page.credentials?.resetMailboxId === box.id" :credentials="page.credentials" />
                 </li>
                 <li v-if="!page.mailboxes.data.length" class="empty-state">
-                    <span class="empty-icon"><PanelIcon name="mails" /></span><strong>Пока нет постоянных ящиков</strong>
+                    <strong class="icon-heading"><PanelIcon name="mails" /> Пока нет постоянных ящиков</strong>
                 </li>
             </ul>
             <PanelPagination :pages="page.mailboxes" label="Страницы ящиков" />
         </section>
         <section id="create-mailbox" class="card form-card">
-            <span class="large-icon"><PanelIcon name="plus" /></span><h2>Создать ящик</h2>
+            <h2 class="icon-heading"><PanelIcon name="plus" /> Создать ящик</h2>
             <p v-if="options.length" class="description">Владелец получит постоянный адрес и пароль для входа.</p>
             <p v-else class="description">Добавьте почтовый домен в <RouterLink to="/admin/settings">настройках</RouterLink>, чтобы создать ящик.</p>
             <form v-if="options.length || createdCredentials" class="stack-form" method="post" :action="createPath" @submit.prevent="issue">

@@ -15,8 +15,7 @@ defineProps<{
 
 <template>
     <div v-if="!letters.length" class="empty-state">
-        <span class="empty-icon"><PanelIcon name="inbox" /></span>
-        <strong>{{ emptyLabel ?? 'Писем пока нет' }}</strong>
+        <strong class="icon-heading"><PanelIcon name="inbox" /> {{ emptyLabel ?? 'Писем пока нет' }}</strong>
         <p>{{ emptyHint }}</p>
     </div>
     <div v-else class="letter-table">

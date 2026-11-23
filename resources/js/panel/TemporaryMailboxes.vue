@@ -21,7 +21,6 @@ defineEmits<{ refresh: [] }>()
                 {{ refresh === 'failed' ? 'Повторить' : 'Обновить' }}
             </button>
         </div>
-        <p v-if="refresh === 'loading'" role="status">Обновляем список ящиков…</p>
         <p v-if="refresh === 'failed'" role="status">Не удалось обновить список ящиков.</p>
         <ul v-if="page.mailboxes.data.length" class="box-list">
             <li v-for="box in page.mailboxes.data" :key="box.id">
@@ -43,8 +42,7 @@ defineEmits<{ refresh: [] }>()
             </li>
         </ul>
         <div v-else-if="!refresh" class="empty-state">
-            <span class="empty-icon"><PanelIcon name="timer" /></span>
-            <strong>Активных временных ящиков нет</strong>
+            <strong class="icon-heading"><PanelIcon name="timer" /> Активных временных ящиков нет</strong>
         </div>
         <PanelPagination v-if="!refresh" :pages="page.mailboxes" label="Страницы временных ящиков" />
     </section>

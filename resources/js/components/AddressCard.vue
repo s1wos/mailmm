@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { AtSign, Check, Clock3, Copy, Infinity as InfinityIcon, Repeat2 } from '@lucide/vue'
+import { AtSign, Check, Clock3, Copy, Infinity as InfinityIcon, Repeat2, X } from '@lucide/vue'
 import { useEmailStore } from '../stores/emailStore'
 import { useActionGuard } from '../useActionGuard'
 import type { AddressFormat } from '../model/types'
@@ -11,6 +11,7 @@ const props = defineProps<{ now: number }>()
 const store = useEmailStore()
 const guard = useActionGuard(() => store.isAdmin)
 const dialog = ref<HTMLDialogElement | null>(null)
+const pressedBackdrop = ref(false)
 const domainSelect = ref<HTMLSelectElement | null>(null)
 const cancelButton = ref<HTMLButtonElement | null>(null)
 const preferredDomain = ref('')
@@ -27,6 +28,7 @@ const canConfirm = computed(() => !!store.mailbox?.expires_at && !store.optionsL
     && formats.value.includes(format.value))
 const addressText = ref<HTMLElement | null>(null)
 const copyState = ref<'idle' | 'copied' | 'manual'>('idle')
+const copied = computed(() => copyState.value === 'copied')
 const copyKey = computed(() => 'copy:' + store.mailbox?.id)
 const copyBlocked = computed(() => guard.blocked(copyKey.value) || (!store.isAdmin && copyState.value !== 'idle'))
 const copyFocus = ref<HTMLButtonElement | null>(null)
@@ -103,6 +105,17 @@ function loadOptions() {
     return guard.run('options', 1000, () => store.loadOptions())
 }
 
+function dismissDialog() {
+    if (!store.rotating) dialog.value?.close()
+}
+
+function isBackdrop(event: MouseEvent) {
+    // The native backdrop and the dialog's padding both target the dialog.
+    if (!dialog.value || event.target !== dialog.value) return false
+    const { left, right, top, bottom } = dialog.value.getBoundingClientRect()
+    return event.clientX < left || event.clientX >= right || event.clientY < top || event.clientY >= bottom
+}
+
 function openRotation() {
     if (dialog.value?.open || !store.mailbox || store.rotating) return
     domain.value = addressParts.value[1].slice(1)
@@ -140,15 +153,17 @@ async function confirmRotation() {
             </button>
             <p v-else class="address-value address-status">{{ store.rotating ? 'Меняем адрес…' : store.issuancePaused ? 'Выдача приостановлена' : store.error ? 'Адрес недоступен' : 'Получаем адрес…' }}</p>
             <div class="address-actions">
-                <button ref="copyFocus" type="button" class="btn copy-btn" :disabled="!store.mailbox" :aria-disabled="copyBlocked || undefined" @click="copyAddress">
-                    <component :is="copyState === 'copied' ? Check : Copy" aria-hidden="true" />
-                    {{ copyState === 'copied' ? 'Скопировано' : 'Скопировать' }}
+                <button ref="copyFocus" type="button" class="btn copy-btn" :class="{ copied }" :disabled="!store.mailbox" :aria-disabled="copyBlocked || undefined" @click="copyAddress">
+                    <Copy class="copy-pages" aria-hidden="true" />
+                    <Check class="copy-check" aria-hidden="true" />
+                    <span :class="{ 'sizing-label': copied }">Скопировать</span>
+                    <span :class="{ 'sizing-label': !copied }">Скопировано</span>
                 </button>
                 <button v-if="!permanent" type="button" class="btn change-btn" :disabled="!store.mailbox || store.rotating" @click="openRotation">
                     <Repeat2 aria-hidden="true" /> Сменить адрес
                 </button>
             </div>
-            <span class="visually-hidden" role="status">{{ copyState === 'copied' ? 'Адрес скопирован' : '' }}</span>
+            <span class="visually-hidden" role="status">{{ copied ? 'Адрес скопирован' : '' }}</span>
             <MailboxWarning :message="copyState === 'manual' ? 'Адрес выделен. Скопируйте его через меню браузера.' : ''" />
             <MailboxWarning :message="rotationWarning" @dismiss="store.rotationError = ''" />
         </section>
@@ -176,9 +191,17 @@ async function confirmRotation() {
         </section>
     </div>
     <dialog v-if="!permanent" ref="dialog" class="modal" aria-labelledby="reset-title" aria-describedby="reset-description"
-        @cancel="store.rotating && $event.preventDefault()">
-        <div class="modal-symbol"><Repeat2 aria-hidden="true" /></div>
-        <h2 id="reset-title">Сменить адрес?</h2>
+        @cancel.prevent="dismissDialog" @pointerdown="pressedBackdrop = isBackdrop($event)"
+        @click.self="pressedBackdrop && isBackdrop($event) && dismissDialog()">
+        <div class="modal-heading">
+            <h2 id="reset-title" class="icon-heading">
+                <Repeat2 aria-hidden="true" />
+                Сменить адрес?
+            </h2>
+            <button type="button" class="icon-button modal-close" aria-label="Закрыть окно" :disabled="store.rotating" @click="dismissDialog">
+                <X aria-hidden="true" />
+            </button>
+        </div>
         <p id="reset-description">После смены адреса вы потеряете доступ к письмам и вложениям текущего ящика.</p>
         <form @submit.prevent="guard.run('rotate', 1000, confirmRotation)">
             <div class="address-field">
@@ -206,7 +229,7 @@ async function confirmRotation() {
             </p>
             <p v-else-if="!store.optionsLoading && !store.domainOptions.length && !choiceError" role="status">Нет доступных доменов для выдачи адреса.</p>
             <div class="modal-actions">
-                <button ref="cancelButton" autofocus type="button" class="btn neutral-btn" :disabled="store.rotating" @click="dialog?.close()">Отмена</button>
+                <button ref="cancelButton" autofocus type="button" class="btn neutral-btn" :disabled="store.rotating" @click="dismissDialog">Отмена</button>
                 <button type="submit" class="btn solid-btn rotate-submit" :disabled="!canConfirm" :aria-disabled="guard.blocked('rotate') || undefined">
                     <span :class="{ 'sizing-label': store.rotating }">Сменить адрес</span>
                     <span :class="{ 'sizing-label': !store.rotating }">Меняем адрес…</span>
@@ -217,6 +240,15 @@ async function confirmRotation() {
 </template>
 
 <style scoped>
+.copy-btn { display: inline-grid; }
+.copy-btn.btn:is(:hover, :active) { transform: none; }
+.copy-btn:focus-visible { outline: none; }
+.copy-btn:focus-visible > span { text-decoration: underline; text-underline-offset: .2em; }
+.copy-btn > svg { grid-area: 1 / 1; }
+.copy-btn > span { grid-area: 1 / 2; text-align: start; }
+.copy-check { opacity: 0; stroke-dasharray: 24; stroke-dashoffset: -24; }
+.copied .copy-pages { opacity: 0; transform: scale(.7); }
+.copied .copy-check { opacity: 1; stroke-dashoffset: 0; }
 .modal { --action-spacing: 20px; padding-bottom: var(--action-spacing); }
 .address-field { display: grid; gap: 6px; margin-bottom: 14px; font-size: 14px; font-weight: 600; }
 .domain-loading { margin-inline-start: .5em; color: var(--mm-muted); font-weight: 400; }
@@ -224,6 +256,7 @@ async function confirmRotation() {
     width: 100%; min-width: 0; padding: 9px 10px; font: inherit; font-weight: 400; color: var(--mm-ink);
     background: var(--mm-surface); border: 1px solid var(--mm-line); border-radius: 9px;
 }
+.address-field select:focus-visible { outline: none; border-color: var(--mm-focus); }
 .address-example { overflow-wrap: anywhere; }
 .modal-actions { margin-top: var(--action-spacing); }
 .modal-actions .btn:is(:hover, :active) { transform: none; }
@@ -243,6 +276,8 @@ async function confirmRotation() {
     transform: rotate(180deg);
 }
 @media (prefers-reduced-motion: no-preference) {
+    .copy-pages { transition: opacity .18s ease, transform .22s ease; }
+    .copy-check { transition: opacity .18s ease, stroke-dashoffset .32s ease-in-out; }
     .expiry-second-hand { transform: rotate(var(--second-angle)); }
 }
 </style>

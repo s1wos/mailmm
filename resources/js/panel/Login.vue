@@ -30,8 +30,7 @@ async function login(event: SubmitEvent) {
         <section class="login-form-wrap">
             <RouterLink class="back-link" to="/"><PanelIcon name="arrow-left" />К почте</RouterLink>
             <div class="login-form-block">
-                <span class="large-icon"><PanelIcon name="lock-keyhole" /></span>
-                <h1>Вход в панель</h1>
+                <h1 class="icon-heading"><PanelIcon name="lock-keyhole" /> Вход в панель</h1>
                 <p>Введите адрес и пароль своей учётной записи.</p>
                 <form class="stack-form" method="post" action="/admin/login" @input="edited" @submit.prevent="login">
                     <div>
