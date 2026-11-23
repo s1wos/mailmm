@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Http\Requests\ChangeGuestMailboxRequest;
 use App\Models\Email;
 use App\Models\MailboxSettings;
 use Illuminate\Database\Eloquent\Builder;
@@ -9,7 +10,6 @@ use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\RateLimiter;
-use Illuminate\Support\Facades\Validator;
 
 class MailboxSession
 {
@@ -59,10 +59,7 @@ class MailboxSession
                     'message' => 'Выдача временных адресов приостановлена.',
                 ], 503));
             }
-            $data = Validator::make($selection ?? [], [
-                'domain' => ['sometimes', 'required', 'string', 'max:252'],
-                'format' => ['sometimes', 'required', 'string', 'in:random,words'],
-            ])->validate();
+            $data = ChangeGuestMailboxRequest::validate($selection ?? []);
             $format = $data['format'] ?? 'random';
             $domain = $this->domains->forIssuance($data['domain'] ?? null, $format);
             $key = self::ISSUE_LIMIT_PREFIX.hash('sha256', (string) $request->ip());

@@ -16,3 +16,12 @@
     font-family: var(--mm-font);
     font-synthesis: none;
 }
+
+.brand::before, .wordmark::before {
+    content: "";
+    flex: none;
+    width: 1.05em;
+    height: 1.05em;
+    margin-inline-end: 6px;
+    background: url('../images/mailmm.svg?no-inline') center / contain no-repeat;
+}

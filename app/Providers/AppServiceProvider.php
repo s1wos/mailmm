@@ -37,5 +37,8 @@ class AppServiceProvider extends ServiceProvider
         Gate::define('administer-mail', fn (User $user): Response => $user->is_admin
             ? Response::allow()
             : Response::deny(''));
+        Gate::define('change-mailbox-password', fn (User $user): Response => ! $user->is_admin && $user->mailbox()->activePermanent()->exists()
+            ? Response::allow()
+            : Response::deny(''));
     }
 }

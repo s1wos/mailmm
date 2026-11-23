@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
 import PanelIcon from './PanelIcon.vue'
 import { formatTimestamp } from './format'
 import type { MessagePage } from './types'
@@ -7,10 +7,19 @@ import { useActionGuard } from '../useActionGuard'
 
 const props = defineProps<{ page: MessagePage }>()
 const actions = useActionGuard(() => props.page.user.is_admin)
+const router = useRouter()
+
+function returnToList(event: MouseEvent) {
+    const { back, panelLetterList } = router.options.history.state
+    if (typeof back === 'string' && back === panelLetterList) {
+        event.preventDefault()
+        router.back()
+    }
+}
 </script>
 
 <template>
-    <RouterLink class="back-link" :to="page.backUrl">
+    <RouterLink class="back-link" :to="page.backUrl" @click.left.exact.capture="returnToList">
         <PanelIcon name="arrow-left" />{{ page.user.is_admin && page.backUrl === '/admin' ? 'К обзору' : 'К списку писем' }}
     </RouterLink>
     <article class="card message-card">

@@ -1,23 +1,10 @@
 import assert from 'node:assert/strict'
-import { after, before, test, type TestContext } from 'node:test'
+import { test, type TestContext } from 'node:test'
 import { setImmediate as flush } from 'node:timers/promises'
-import vue from '@vitejs/plugin-vue'
 import { createPinia } from 'pinia'
-import { createServer, type ViteDevServer } from 'vite'
-import { createRenderer, createSSRApp, nodeOps, patchProp, ssrContextKey } from 'vue'
-import { renderToString } from 'vue/server-renderer'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import type { PanelUser } from '../../resources/js/panel/types.ts'
-
-let vite: ViteDevServer
-before(async () => {
-    vite = await createServer({
-        configFile: false,
-        plugins: [vue()],
-        server: { middlewareMode: true, ws: false, watch: null },
-    })
-})
-after(() => vite.close())
+import { loadComponent, mountSsrComponent } from './vueFixture.ts'
 
 const admin = { id: 1, email: 'admin@example.test', is_admin: true }
 const owner = { id: 2, email: 'owner@example.test', is_admin: false }
@@ -50,7 +37,7 @@ function firstOfTwoPages(rowExpiry: string) {
 }
 
 async function openPanel(t: TestContext, path: string) {
-    const PanelPage = (await vite.ssrLoadModule('/resources/js/panel/PanelPage.vue')).default
+    const PanelPage = await loadComponent('/resources/js/panel/PanelPage.vue')
     const router = createRouter({
         history: createMemoryHistory(),
         routes: [
@@ -72,21 +59,9 @@ async function openPanel(t: TestContext, path: string) {
         return response.promise
     })
 
-    const renderer = createRenderer({
-        ...nodeOps, patchProp,
-        createComment: () => ({} as Comment), insert() {}, remove() {},
-    })
-    let html!: () => Promise<string>
-    const app = renderer.createApp({
-        setup(props, context) {
-            const state = PanelPage.setup(props, context)
-            html = () => renderToString(createSSRApp({ ...PanelPage, setup: () => state }).use(router))
-            return () => null
-        },
-    }).provide(ssrContextKey, {}).use(createPinia()).use(router)
-    app.mount({} as Element)
+    const { html, unmount } = mountSsrComponent(PanelPage, {}, createPinia(), router)
     t.after(() => {
-        app.unmount()
+        unmount()
         Reflect.deleteProperty(globalThis, 'window')
         Reflect.deleteProperty(globalThis, 'document')
     })
@@ -99,6 +74,62 @@ async function openPanel(t: TestContext, path: string) {
     }
     return { router, html, respond, requests, dispatch: (event: Event) => events.dispatchEvent(event) }
 }
+
+test('paging within a panel list keeps its rows mounted until the new page arrives', async t => {
+    const panel = await openPanel(t, archivePath)
+    await panel.respond(archivePath, firstOfTwoPages(later))
+    const next = archivePath + '?page=2'
+    await panel.router.push(next)
+    assert.match(await panel.html(), /Letter 26/)
+    await panel.respond(next, { ...archive(admin), serverTime: beforeExpiry, nextExpiryAt: later,
+        messages: { ...emptyList, current_page: 2, last_page: 2, data: [{ ...pageOfLetters(1, later)[0], subject: 'Last letter' }] } })
+    assert.match(await panel.html(), /Last letter/)
+    assert.doesNotMatch(await panel.html(), /Letter 26/)
+})
+
+test('moving between mailbox receipts keeps the form but immediately clears the previous password', async t => {
+    const panel = await openPanel(t, ticket)
+    await panel.respond(ticket, issued)
+    const next = '/admin/mailboxes?issued=15&ticket=second'
+    await panel.router.push(next)
+    const pending = await panel.html()
+    assert.match(pending, /<h1>Ящики<\/h1>/)
+    assert.ok(!pending.includes(credentials.password))
+})
+
+test('a failed next page leaves the current list visible with a retry', async t => {
+    const panel = await openPanel(t, archivePath)
+    await panel.respond(archivePath, firstOfTwoPages(later))
+    const next = archivePath + '?page=2'
+    await panel.router.push(next)
+    await panel.respond(next, {}, 503)
+    const html = await panel.html()
+    assert.ok(html.includes('Letter 26'))
+    assert.match(html, /<button\b[^>]*>Повторить<\/button>/)
+})
+
+test('losing permission while paging hides the retained list and rechecks the account', async t => {
+    const panel = await openPanel(t, archivePath)
+    await panel.respond(archivePath, firstOfTwoPages(later))
+    const next = archivePath + '?page=2'
+    await panel.router.push(next)
+    await panel.respond(next, {}, 403)
+    assert.ok(!(await panel.html()).includes('Letter 26'))
+    await panel.respond('/admin/session', { user: owner })
+    assert.equal(panel.router.currentRoute.value.fullPath, '/admin')
+})
+
+test('a failed page request still checks the account after the window regained focus', async t => {
+    const panel = await openPanel(t, archivePath)
+    await panel.respond(archivePath, firstOfTwoPages(later))
+    const next = archivePath + '?page=2'
+    await panel.router.push(next)
+    panel.dispatch(new Event('focus'))
+    await panel.respond(next, {}, 503)
+    await panel.respond('/admin/session', { user: owner })
+    assert.equal(panel.router.currentRoute.value.fullPath, '/admin')
+    assert.ok(!(await panel.html()).includes('Letter 26'))
+})
 
 test('revisiting recently opened panel tabs shows their data immediately without fetching them again', async t => {
     const panel = await openPanel(t, archivePath)

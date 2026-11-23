@@ -66,7 +66,7 @@ export interface MailboxesPage {
     screen: 'mailboxes'
     user: PanelUser
     request_id: string
-    credentials: { email: string, password: string } | null
+    credentials: { email: string, password: string, resetMailboxId?: number } | null
     mailboxes: Paginated<{ id: number, email: string, created_at: string }>
     domains: (MailboxDomainOption & { limit: number })[]
 }

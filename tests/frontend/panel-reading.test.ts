@@ -1,20 +1,9 @@
 import assert from 'node:assert/strict'
-import { after, before, test } from 'node:test'
-import vue from '@vitejs/plugin-vue'
-import { createServer, type ViteDevServer } from 'vite'
+import { test } from 'node:test'
 import { createSSRApp } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 import { createMemoryHistory, createRouter } from 'vue-router'
-
-let vite: ViteDevServer
-before(async () => {
-    vite = await createServer({
-        configFile: false,
-        plugins: [vue()],
-        server: { middlewareMode: true, ws: false, watch: null },
-    })
-})
-after(() => vite.close())
+import { loadComponent } from './vueFixture.ts'
 
 const admin = { id: 1, email: 'admin@example.test', is_admin: true }
 const owner = { id: 2, email: 'owner@example.test', is_admin: false }
@@ -24,7 +13,7 @@ const letter = {
 }
 
 async function render(screen: string, page: object, url: string) {
-    const component = (await vite.ssrLoadModule(`/resources/js/panel/${screen}.vue`)).default
+    const component = await loadComponent(`/resources/js/panel/${screen}.vue`)
     const router = createRouter({
         history: createMemoryHistory(),
         routes: [{ path: '/:pathMatch(.*)*', component }],

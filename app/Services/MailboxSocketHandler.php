@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Http\Requests\MailboxSocketRequest;
 use Laravel\Reverb\Contracts\Connection;
 use Laravel\Reverb\Events\MessageReceived;
 use Laravel\Reverb\Events\MessageSent;
@@ -57,16 +58,13 @@ class MailboxSocketHandler
     {
         $frame = json_decode($event->message, true);
         $command = $frame['event'] ?? null;
-        if (! in_array($command, ['mailbox.check', 'mailbox.page'], true)) {
-            return;
-        }
-        $connection = $event->connection;
         $channel = $frame['channel'] ?? null;
         $data = $frame['data'] ?? null;
         $id = $data['requestId'] ?? null;
-        if (! is_string($id) || ! preg_match('/\A[A-Za-z0-9_-]{1,80}\z/', $id) || ! is_string($channel)) {
+        if (! MailboxSocketRequest::hasValidEnvelope($command, $channel, $id)) {
             return;
         }
+        $connection = $event->connection;
         $member = $this->member($connection, $channel);
         if (! $member || ! isset($this->subscriptions[$member])) {
             $this->send($connection, $channel, 'mailbox.error', ['requestId' => $id, 'code' => 'access_revoked']);
@@ -75,7 +73,7 @@ class MailboxSocketHandler
         }
         $state = &$this->subscriptions[$member];
         $seen = $state['seen'];
-        if (isset($seen[$id]) || ! $this->valid($command, $data)) {
+        if (isset($seen[$id]) || ! MailboxSocketRequest::hasValidPayload($command, $data)) {
             $this->send($connection, $channel, 'mailbox.error', ['requestId' => $id, 'code' => 'invalid_request']);
 
             return;
@@ -128,24 +126,13 @@ class MailboxSocketHandler
 
     private function member(Connection $connection, mixed $channel): ?MailboxChannelMember
     {
-        if (! is_string($channel) || ! preg_match('/\Aprivate-mailbox\.[1-9]\d*\z/', $channel)) {
+        if (! MailboxChannelConnections::isMailboxChannel($channel)) {
             return null;
         }
 
         $member = $this->channels->for($connection->app())->find($channel)?->find($connection);
 
         return $member instanceof MailboxChannelMember ? $member : null;
-    }
-
-    private function valid(string $command, array $data): bool
-    {
-        if ($command === 'mailbox.page') {
-            return is_string($data['continuation'] ?? null) && strlen($data['continuation']) <= 2500;
-        }
-
-        return in_array($data['reason'] ?? null, ['manual', 'auto', 'subscribed', 'delivery', 'resume'], true)
-            && (! isset($data['snapshot']) || (is_string($data['snapshot']) && strlen($data['snapshot']) <= 100))
-            && (! isset($data['deliveryId']) || (is_int($data['deliveryId']) && $data['deliveryId'] > 0));
     }
 
     private function reply(Connection $connection, string $channel, array $result): void

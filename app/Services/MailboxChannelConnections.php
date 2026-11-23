@@ -8,9 +8,14 @@ use Laravel\Reverb\Protocols\Pusher\Managers\ArrayChannelConnectionManager;
 
 class MailboxChannelConnections extends ArrayChannelConnectionManager
 {
+    public static function isMailboxChannel(mixed $name): bool
+    {
+        return is_string($name) && preg_match('/\Aprivate-mailbox\.[1-9]\d*\z/', $name);
+    }
+
     public function add(Connection $connection, array $data): void
     {
-        if (preg_match('/\Aprivate-mailbox\.[1-9]\d*\z/', $this->name)) {
+        if (self::isMailboxChannel($this->name)) {
             $this->remove($connection);
             $this->connections[$connection->id()] = new MailboxChannelMember($connection, $data, $this->name);
 

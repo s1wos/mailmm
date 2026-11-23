@@ -190,6 +190,20 @@ class MailboxTest extends TestCase
         $this->getJson('/api/messages')->assertOk()->assertHeader('X-Mailbox-Id', '0');
     }
 
+    public function test_an_invalid_page_cursor_still_recovers_the_guest_session_from_its_cookie(): void
+    {
+        config(['session.lifetime' => 10]);
+        $this->freezeSecond();
+        $issued = $this->getJson('/api/email')->assertOk();
+        $email = Email::findOrFail($issued->json('data.id'));
+        $name = config('session.cookie').'_mailbox_'.$email->id.'_'.now()->addMinutes(10)->timestamp;
+        $this->flushSession();
+        $this->withCredentials()->withUnencryptedCookie($name, $issued->getCookie($name, false)->getValue());
+
+        $this->getJson('/api/messages?cursor=invalid')->assertUnprocessable()
+            ->assertJsonValidationErrors('id')->assertSessionHas('guest_mailbox_key', $email->guest_session_key);
+    }
+
     public function test_a_delayed_first_rotation_response_cannot_shorten_or_replace_a_later_issue(): void
     {
         $this->freezeSecond();

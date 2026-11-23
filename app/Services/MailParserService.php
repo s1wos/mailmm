@@ -16,7 +16,6 @@ class MailParserService
         $message = (new MailMimeParser)->parse($raw, false);
         $this->applyDigestDefaults($message);
         $from = $message->getHeader('From');
-        $html = $this->text($message->getHtmlContent());
 
         $attachments = [];
         $files = [
@@ -41,7 +40,6 @@ class MailParserService
             from: $this->text($from instanceof AddressHeader ? $from->getEmail() : null) ?? '',
             subject: $this->text($message->getSubject()),
             bodyText: $this->bodyText($message),
-            bodyHtml: $html,
             attachments: $attachments,
         );
     }

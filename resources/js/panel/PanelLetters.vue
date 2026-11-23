@@ -28,7 +28,7 @@ defineProps<{
                 <RouterLink
                     class="mail-row mail-grid"
                     :class="{ 'owner-grid': !isAdmin }"
-                    :to="{ path: `/admin/messages/${letter.id}`, query: listQuery }"
+                    :to="{ path: `/admin/messages/${letter.id}`, query: listQuery, state: { panelLetterList: $route.fullPath } }"
                 >
                     <span class="mail-cell">
                         <span class="mail-icon"><PanelIcon name="mail" /></span>

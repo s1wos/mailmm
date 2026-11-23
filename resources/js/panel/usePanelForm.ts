@@ -24,7 +24,7 @@ export function usePanelForm(isAdmin: () => boolean = () => false, onInvalid?: (
         if (Object.keys(state.fields).length) guard.reset()
     }
 
-    async function submit(event: SubmitEvent, method = 'POST'): Promise<FormResult | undefined> {
+    async function submit<T extends FormResult = FormResult>(event: SubmitEvent, method = 'POST'): Promise<T | undefined> {
         if (state.pending || lifetime.signal.aborted) return
         const element = event.currentTarget as HTMLFormElement
         const action = element.getAttribute('action')!
@@ -36,7 +36,7 @@ export function usePanelForm(isAdmin: () => boolean = () => false, onInvalid?: (
         state.fields = {}
         state.message = ''
         try {
-            const result = await panelRequest<FormResult>(action, {
+            const result = await panelRequest<T>(action, {
                 method,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(values),

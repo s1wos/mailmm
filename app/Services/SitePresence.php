@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Http\Requests\BrowserCookies;
 use GuzzleHttp\Exception\GuzzleException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Broadcast;
@@ -18,7 +19,7 @@ class SitePresence
     {
         $id = $request->cookie(config('session.cookie').'_visitor');
 
-        return is_string($id) && preg_match('/\A[a-f0-9]{32}\z/', $id) ? self::CHANNEL_PREFIX.$id : null;
+        return BrowserCookies::validVisitorId($id) ? self::CHANNEL_PREFIX.$id : null;
     }
 
     public static function pageChannel(Request $request): ?string

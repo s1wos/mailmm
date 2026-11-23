@@ -2,7 +2,9 @@
 
 namespace App\Models;
 
+use App\Rules\MailboxDomainName;
 use Illuminate\Database\Eloquent\Casts\Attribute;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Validation\ValidationException;
 
@@ -12,6 +14,11 @@ class MailboxDomain extends Model
 
     protected $fillable = ['name', 'issuance_enabled'];
 
+    public static function forSettings(): Collection
+    {
+        return static::orderBy('name')->get(['id', 'name', 'issuance_enabled']);
+    }
+
     protected function casts(): array
     {
         return ['issuance_enabled' => 'boolean'];
@@ -19,19 +26,7 @@ class MailboxDomain extends Model
 
     protected function name(): Attribute
     {
-        return Attribute::set(function (string $value): string {
-            $name = strtolower(trim($value, " \t\n\r\v\f"));
-            if (str_ends_with($name, '.')) {
-                $name = substr($name, 0, -1);
-            }
-            $label = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
-            if (strlen($name) > 252 || ! preg_match("/\\A{$label}(?:\\.{$label})+\\z/", $name)) {
-                throw ValidationException::withMessages([
-                    'name' => 'Введите домен длиной до 252 символов с двумя или более DNS-метками. Для кириллицы используйте Punycode.',
-                ]);
-            }
-
-            return $name;
-        });
+        return Attribute::set(fn (string $value) => MailboxDomainName::parse($value)
+            ?? throw ValidationException::withMessages(['name' => MailboxDomainName::INVALID_NAME]));
     }
 }

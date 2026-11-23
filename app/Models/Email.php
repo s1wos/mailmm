@@ -29,6 +29,11 @@ class Email extends Model
         });
     }
 
+    public function scopeActivePermanent(Builder $query): Builder
+    {
+        return $query->whereNotNull('owner_user_id')->whereNull('expires_at')->whereNull('closed_at');
+    }
+
     public function messages(): HasMany
     {
         return $this->hasMany(Message::class);

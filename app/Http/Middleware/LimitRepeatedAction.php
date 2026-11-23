@@ -38,7 +38,8 @@ class LimitRepeatedAction
 
     private function pageKey(Request $request): string
     {
-        $cursor = Cursor::fromEncoded($request->query('cursor'))?->toArray();
+        $encoded = ($request->query() + $request->only('cursor'))['cursor'] ?? null;
+        $cursor = Cursor::fromEncoded($encoded)?->toArray();
         if (! is_numeric($cursor['id'] ?? null) || ! is_string($cursor['received_at'] ?? null)) {
             return 'first';
         }

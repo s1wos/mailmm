@@ -52,7 +52,7 @@ class MailDeliveryTest extends TestCase
         $this->travelTo(now()->startOfSecond());
     }
 
-    private function deliver(string $recipient, string $raw = self::RAW, bool $postfix = false): int
+    private function deliver(string $recipient, string $raw = self::RAW, bool $postfix = false, ?int &$bytesRead = null): int
     {
         $stream = fopen('php://temp', 'w+b');
         fwrite($stream, $raw);
@@ -66,6 +66,7 @@ class MailDeliveryTest extends TestCase
         try {
             return app(Kernel::class)->handle($input, new BufferedOutput);
         } finally {
+            $bytesRead = ftell($stream);
             fclose($stream);
         }
     }
@@ -181,6 +182,7 @@ class MailDeliveryTest extends TestCase
         }
         config(['mailbox.max_message_bytes' => '001024']);
         $this->artisan('mail:parse --check-limit')->expectsOutput('1024')->assertSuccessful();
+        $this->artisan('mail:parse --check-limit --postfix')->expectsOutput('1024')->assertSuccessful();
     }
 
     public function test_postfix_long_queue_id_distinguishes_mailbox_creation_within_the_same_second(): void
@@ -265,6 +267,7 @@ class MailDeliveryTest extends TestCase
         self::assertSame('Привет', $message->subject);
         self::assertTrue(now()->equalTo($message->received_at));
         self::assertSame("Hello & welcome!\nSecond line.", $message->body_text);
+        self::assertNull($message->body_html);
         self::assertCount(2, $message->attachments);
         foreach ($message->attachments as $index => $file) {
             self::assertSame('sample.bin', $file['filename']);
@@ -367,10 +370,12 @@ class MailDeliveryTest extends TestCase
 
     public function test_rejects_foreign_envelope_empty_input_and_messages_beyond_size_limit(): void
     {
-        self::assertSame(67, $this->deliver('other@example.org'));
+        self::assertSame(67, $this->deliver('other@example.org', bytesRead: $bytesRead));
+        self::assertSame(0, $bytesRead);
         self::assertSame(65, $this->deliver('guest@mail.test', ''));
-        config(['mailbox.max_message_bytes' => strlen(self::RAW) - 1]);
-        self::assertSame(65, $this->deliver('guest@mail.test'));
+        config(['mailbox.max_message_bytes' => 32]);
+        self::assertSame(65, $this->deliver('guest@mail.test', bytesRead: $bytesRead));
+        self::assertSame(33, $bytesRead);
         self::assertSame(0, Message::count());
         config(['mailbox.max_message_bytes' => strlen(self::RAW)]);
         self::assertSame(0, $this->deliver('guest@mail.test'));
@@ -398,10 +403,11 @@ class MailDeliveryTest extends TestCase
         $disk->put('mail', 'occupied');
         self::assertSame(75, $this->deliver('guest@mail.test', $raw));
         $pending = Message::sole();
+        self::assertNull($pending->body_html);
         $oldFiles = array_slice($pending->attachments, 0, 2);
         $obsoletePath = $oldFiles[0]['path'].'-obsolete';
         $oldFiles[] = [...$oldFiles[0], 'path' => $obsoletePath];
-        $pending->update(['body_text' => 'Outdated body', 'attachments' => $oldFiles]);
+        $pending->update(['body_text' => 'Outdated body', 'body_html' => '<p>Previously stored HTML</p>', 'attachments' => $oldFiles]);
         $disk->delete('mail');
         $disk->put($obsoletePath, 'previous partial copy');
 
@@ -409,6 +415,7 @@ class MailDeliveryTest extends TestCase
         $delivered = Message::query()->retained()->sole();
         self::assertSame($pending->id, $delivered->id);
         self::assertStringContainsString('Additional note.', $delivered->body_text);
+        self::assertSame('<p>Previously stored HTML</p>', $delivered->body_html);
         self::assertCount(3, $delivered->attachments);
         self::assertSame('Additional note.', $disk->get($delivered->attachments[2]['path']));
         $disk->assertMissing($obsoletePath);

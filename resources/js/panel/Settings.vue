@@ -1,32 +1,28 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { reactive } from 'vue'
 import PanelHeading from './PanelHeading.vue'
 import PanelIcon from './PanelIcon.vue'
+import PanelPasswordForm from './PanelPasswordForm.vue'
 import type { SettingsPage } from './types'
 import { usePanelForm } from './usePanelForm'
-import { notifyMailboxSessionChanged } from '../mailboxSocket'
 
 const props = defineProps<{ page: SettingsPage }>()
-const emit = defineEmits<{ updated: [message?: string] }>()
-const { state, submit, messageFor } = usePanelForm(() => props.page.user.is_admin)
+const emit = defineEmits<{ domainsUpdated: [domains: SettingsPage['domains']] }>()
+const panelForm = usePanelForm(() => props.page.user.is_admin)
+const { state, submit, messageFor } = panelForm
 const domainsPath = '/admin/settings/domains'
 const issuancePath = '/admin/settings/issuance'
-const passwordPath = '/admin/settings/password'
-const issuanceNotice = ref('')
+const notices = reactive<Record<string, string>>({})
 
-async function saveIssuance(event: SubmitEvent) {
-    issuanceNotice.value = ''
-    const result = await submit(event, 'PATCH')
-    issuanceNotice.value = result?.message ?? ''
-}
-
-async function save(event: SubmitEvent, method: 'POST' | 'PATCH' | 'PUT') {
+async function save(event: SubmitEvent, method: 'POST' | 'PATCH') {
     const form = event.currentTarget as HTMLFormElement
-    const result = await submit(event, method)
+    const action = form.getAttribute('action')!
+    delete notices[action]
+    const result = await submit<{ message: string, domains?: SettingsPage['domains'] }>(event, method)
     if (!result) return
-    if (method === 'PUT') notifyMailboxSessionChanged()
-    if (method === 'POST' || method === 'PUT') form.reset()
-    emit('updated', result.message)
+    if (result.domains) emit('domainsUpdated', result.domains)
+    if (method === 'POST') form.reset()
+    notices[action] = result.message
 }
 </script>
 
@@ -49,64 +45,44 @@ async function save(event: SubmitEvent, method: 'POST' | 'PATCH' | 'PUT') {
                             <p v-if="state.fields.issuance_enabled" class="error" role="alert">Не удалось изменить режим домена.</p>
                             <p v-if="state.message" class="error" role="alert">{{ state.message }}</p>
                         </template>
+                        <p v-if="notices[domainsPath + '/' + domain.id]" class="hint" role="status">{{ notices[domainsPath + '/' + domain.id] }}</p>
                     </form>
                 </li>
             </ul>
-            <form class="stack-form" method="post" :action="domainsPath" @submit.prevent="save($event, 'POST')">
+            <form class="stack-form" method="post" :action="domainsPath" @input="delete notices[domainsPath]" @submit.prevent="save($event, 'POST')">
                 <div>
                     <label for="domain-name">Новый домен</label>
                     <input id="domain-name" name="name" spellcheck="false" autocapitalize="none" placeholder="inbox.example.com" required
+                        :readonly="state.pending && state.action === domainsPath"
                         :aria-invalid="state.fields.name ? true : undefined" :aria-describedby="state.fields.name ? 'name-error' : undefined">
                     <p v-if="state.fields.name" id="name-error" class="error" role="alert">{{ state.fields.name[0] }}</p>
                 </div>
                 <p v-if="messageFor(domainsPath)" class="error" role="alert">{{ state.message }}</p>
                 <button class="button primary" type="submit" :disabled="state.pending">Добавить домен</button>
+                <p v-if="notices[domainsPath]" class="notice success" role="status">{{ notices[domainsPath] }}</p>
             </form>
         </section>
         <section class="card form-card">
             <span class="large-icon"><PanelIcon name="inbox" /></span><h2>Временные ящики</h2>
             <p class="description">Пауза остановит выдачу новых адресов. Уже выданные ящики продолжат получать почту до конца своего срока.</p>
-            <form class="stack-form" method="post" :action="issuancePath" @submit.prevent="saveIssuance">
+            <form class="stack-form" method="post" :action="issuancePath" @submit.prevent="save($event, 'PATCH')">
                 <label class="toggle-field" for="guest-issuance">
                     <span>Выдавать гостевые адреса</span>
                     <input type="hidden" name="guest_issuance_enabled" value="0">
                     <input class="switch" type="checkbox" name="guest_issuance_enabled" id="guest-issuance" value="1"
-                        :checked="page.guestIssuanceEnabled" :disabled="state.pending" @change="issuanceNotice = ''"
+                        :checked="page.guestIssuanceEnabled" :disabled="state.pending" @change="delete notices[issuancePath]"
                         :aria-describedby="state.fields.guest_issuance_enabled ? 'guest-issuance-error' : undefined">
                 </label>
                 <p v-if="state.fields.guest_issuance_enabled" id="guest-issuance-error" class="error" role="alert">Не удалось изменить режим выдачи.</p>
                 <p v-if="messageFor(issuancePath)" class="error" role="alert">{{ state.message }}</p>
                 <button class="button primary" type="submit" :disabled="state.pending">Сохранить</button>
-                <p v-if="issuanceNotice" class="notice success" role="status">{{ issuanceNotice }}</p>
+                <p v-if="notices[issuancePath]" class="notice success" role="status">{{ notices[issuancePath] }}</p>
             </form>
         </section>
         <section class="card form-card">
             <span class="large-icon"><PanelIcon name="shield-check" /></span><h2>Пароль администратора</h2>
             <p class="description">{{ page.user.email }}</p>
-            <form class="stack-form" method="post" :action="passwordPath" @submit.prevent="save($event, 'PUT')">
-                <div>
-                    <label for="current-password">Текущий пароль</label>
-                    <input id="current-password" type="password" name="current_password" autocomplete="current-password" required
-                        :aria-invalid="state.fields.current_password ? true : undefined"
-                        :aria-describedby="state.fields.current_password ? 'current-password-error' : undefined">
-                    <p v-if="state.fields.current_password" id="current-password-error" class="error" role="alert">Проверьте текущий пароль.</p>
-                </div>
-                <div>
-                    <label for="new-password">Новый пароль</label>
-                    <input id="new-password" type="password" name="password" autocomplete="new-password" minlength="12" required
-                        :aria-invalid="state.fields.password ? true : undefined"
-                        :aria-describedby="state.fields.password ? 'password-hint password-error' : 'password-hint'">
-                    <p class="hint" id="password-hint">Не менее 12 символов.</p>
-                </div>
-                <div>
-                    <label for="confirm-password">Повторите новый пароль</label>
-                    <input id="confirm-password" type="password" name="password_confirmation" autocomplete="new-password" required
-                        :aria-describedby="state.fields.password ? 'password-error' : undefined">
-                </div>
-                <p v-if="state.fields.password" id="password-error" class="error" role="alert">{{ state.fields.password[0] }}</p>
-                <p v-if="messageFor(passwordPath)" class="error" role="alert">{{ state.message }}</p>
-                <button class="button primary" type="submit" :disabled="state.pending">Изменить пароль</button>
-            </form>
+            <PanelPasswordForm action="/admin/settings/password" :form="panelForm" />
         </section>
     </div>
 </template>

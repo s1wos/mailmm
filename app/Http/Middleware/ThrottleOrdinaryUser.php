@@ -7,6 +7,12 @@ use Illuminate\Routing\Middleware\ThrottleRequests;
 
 class ThrottleOrdinaryUser extends ThrottleRequests
 {
+    public const PREFIXES = [
+        'login' => 'panel-login:',
+        'close' => 'mailbox-close:',
+        'password' => 'mailbox-password:',
+    ];
+
     public function handle($request, Closure $next, $maxAttempts = 60, $decayMinutes = 1, $prefix = '')
     {
         return $request->user()?->is_admin

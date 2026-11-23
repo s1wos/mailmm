@@ -5,6 +5,7 @@ import Help from '../pages/Help.vue'
 import About from '../pages/About.vue'
 
 import { panelRoutes } from '../panel/routes'
+import { resetScrollRestoration, scrollBehavior } from './scroll'
 export const router = createRouter({
     history: createWebHistory(),
     routes: [{
@@ -16,9 +17,10 @@ export const router = createRouter({
             { path: 'about', component: About, meta: { title: 'О сервисе' } },
         ],
     }, ...panelRoutes],
-    scrollBehavior: (to, _from, saved) => saved ?? (to.hash ? false : { top: 0 }),
+    scrollBehavior,
 })
 
+router.beforeEach(resetScrollRestoration)
 router.afterEach((to, from, failure) => {
     if (failure) return
     const inPanel = Boolean(to.meta.panel)

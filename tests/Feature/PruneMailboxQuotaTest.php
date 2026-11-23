@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -18,19 +19,22 @@ class PruneMailboxQuotaTest extends TestCase
         $this->deleteJson('/api/email', headers: ['X-Expected-Mailbox-Id' => $id])->assertNoContent();
         $this->getJson('/api/email/options')->assertOk();
         $this->postJson('/admin/login')->assertUnprocessable();
+        $owner = User::factory()->create();
+        $owner->mailbox()->create(['email' => $owner->email]);
+        $this->actingAs($owner)->putJson('/admin/account/password')->assertUnprocessable();
         $cache = Cache::store('database');
         $cache->put('unrelated', 'untouched', 60);
         $this->travel(1)->hour();
-        $prefixes = ['guest-mailbox-issue:', 'mailbox-close:', 'panel-login:', 'mailbox-action:'];
+        $prefixes = ['guest-mailbox-issue:', 'mailbox-close:', 'panel-login:', 'mailbox-action:', 'mailbox-password:'];
         foreach ($prefixes as $prefix) {
             $cache->put($prefix.'active', 3, 60);
         }
         $foreign = 'mailXmm!%:guest-mailbox-issue:outside';
         DB::table('cache')->insert(['key' => $foreign, 'value' => '1', 'expiration' => now()->timestamp - 1]);
 
-        $this->assertDatabaseCount('cache', 13);
+        $this->assertDatabaseCount('cache', 16);
         $this->artisan('mail:prune-quota')->assertSuccessful();
-        $this->assertDatabaseCount('cache', 6);
+        $this->assertDatabaseCount('cache', 7);
         foreach ($prefixes as $prefix) {
             $this->assertSame(3, $cache->get($prefix.'active'));
         }

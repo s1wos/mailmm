@@ -1,20 +1,12 @@
 import assert from 'node:assert/strict'
-import { after, before, test, type TestContext } from 'node:test'
-import vue from '@vitejs/plugin-vue'
+import { test, type TestContext } from 'node:test'
 import { createPinia } from 'pinia'
-import { createServer, type ViteDevServer } from 'vite'
-import { createRenderer, createSSRApp, nextTick, nodeOps, patchProp, ssrContextKey } from 'vue'
-import { renderToString } from 'vue/server-renderer'
+import { nextTick } from 'vue'
 import { useEmailStore } from '../../resources/js/stores/emailStore.ts'
-
-let vite: ViteDevServer
-before(async () => {
-    vite = await createServer({ configFile: false, plugins: [vue()], server: { middlewareMode: true, ws: false, watch: null } })
-})
-after(() => vite.close())
+import { loadComponent, mountSsrComponent } from './vueFixture.ts'
 
 async function mountCard(t: TestContext) {
-    const Card = (await vite.ssrLoadModule('/resources/js/components/AddressCard.vue')).default
+    const Card = await loadComponent('/resources/js/components/AddressCard.vue')
     const writes: { address: string, finish: () => void }[] = []
     t.mock.getter(globalThis, 'navigator', () => ({ clipboard: { writeText(address: string) {
         const write = Promise.withResolvers<void>()
@@ -26,26 +18,9 @@ async function mountCard(t: TestContext) {
     const pinia = createPinia()
     const store = useEmailStore(pinia)
     store.mailbox = { id: 1, email: 'first@mail.test', expires_at: null }
-    const props = { now: Date.now() }
-    let copy!: () => Promise<void> | undefined
-    let html!: () => Promise<string>
-    const renderer = createRenderer({ ...nodeOps, patchProp, createComment: () => ({} as Comment), insert() {}, remove() {} })
-    const app = renderer.createApp({
-        setup(_, ctx) {
-            const state = Card.setup(props, ctx)
-            copy = state.copyAddress
-            html = () => renderToString(createSSRApp({ ...Card, setup: () => state }, props).use(pinia))
-            return () => null
-        },
-    }).provide(ssrContextKey, {}).use(pinia)
-    app.mount({} as Element)
-    let mounted = true
-    const unmount = () => {
-        if (mounted) app.unmount()
-        mounted = false
-    }
+    const { state, html, unmount } = mountSsrComponent<{ copyAddress: () => Promise<void> | undefined }>(Card, { now: Date.now() }, pinia)
     t.after(() => { unmount(); Reflect.deleteProperty(globalThis, 'window') })
-    return { copy, html, writes, feedbackTimer, store, unmount }
+    return { copy: state.copyAddress, html, writes, feedbackTimer, store, unmount }
 }
 
 test('a pending clipboard write for the previous address cannot lock or confirm the new address', async t => {

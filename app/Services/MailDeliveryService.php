@@ -51,7 +51,6 @@ class MailDeliveryService
                 'from' => $parsed->from,
                 'subject' => $parsed->subject,
                 'body_text' => $parsed->bodyText,
-                'body_html' => $parsed->bodyHtml,
                 'attachments' => $files,
             ];
             $message = Message::query()->firstOrCreate(['delivery_key' => $key], [

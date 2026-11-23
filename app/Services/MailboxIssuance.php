@@ -34,17 +34,34 @@ class MailboxIssuance
 
         $password = Str::random(32);
         $mailbox = $create($password);
-        DB::table('mailbox_issuances')->insert([
-            'request_key' => $key, 'parameters_hash' => $hash, 'email_id' => $mailbox->id,
-            'session_hash' => hash('sha256', $request->session()->token()),
-            'encrypted_password' => Crypt::encryptString($password), 'expires_at' => now()->addMinutes(10),
-        ]);
+        self::store($request, $key, $hash, $mailbox->id, $password);
 
         return $mailbox->id;
     }
 
+    public static function storeReset(Request $request, int $emailId, string $password): string
+    {
+        $ticket = (string) Str::uuid();
+        DB::table('mailbox_issuances')->where('email_id', $emailId)->whereNull('parameters_hash')->delete();
+        self::store($request, self::requestKey($request, $ticket), null, $emailId, $password);
+
+        return $ticket;
+    }
+
+    private static function store(Request $request, string $key, ?string $parametersHash, int $emailId, string $password): void
+    {
+        DB::table('mailbox_issuances')->insert([
+            'request_key' => $key, 'parameters_hash' => $parametersHash, 'email_id' => $emailId,
+            'session_hash' => hash('sha256', $request->session()->token()),
+            'encrypted_password' => Crypt::encryptString($password), 'expires_at' => now()->addMinutes(10),
+        ]);
+    }
+
     public static function read(Request $request, int $emailId, string $ticket): ?array
     {
+        if (! Str::isUuid($ticket)) {
+            return self::readLegacyReset($request, $emailId, $ticket);
+        }
         $key = self::requestKey($request, $ticket);
 
         return DB::transaction(function () use ($request, $key, $emailId) {
@@ -57,10 +74,33 @@ class MailboxIssuance
             $password = Crypt::decryptString($receipt->encrypted_password);
             $query->update(['encrypted_password' => null, 'expires_at' => null]);
             $address = Email::whereKey($emailId)->value('email');
-            $hash = User::whereEmail($address)->value('password');
 
-            return $hash && Hash::check($password, $hash) ? ['email' => $address, 'password' => $password] : null;
+            return self::currentCredentials($address, $password);
         });
+    }
+
+    private static function readLegacyReset(Request $request, int $emailId, string $ticket): ?array
+    {
+        $cache = $request->session()->cache();
+        $key = 'issued-'.$request->user()->id.'-'.$emailId;
+        $encrypted = $cache->get($key);
+        if (! $encrypted) {
+            return null;
+        }
+        $receipt = Crypt::decrypt($encrypted);
+        if (($receipt['ticket'] ?? null) !== $ticket) {
+            return null;
+        }
+        $cache->forget($key);
+
+        return self::currentCredentials($receipt['email'], $receipt['password']);
+    }
+
+    private static function currentCredentials(?string $address, string $password): ?array
+    {
+        $hash = User::whereEmail($address)->value('password');
+
+        return $hash && Hash::check($password, $hash) ? ['email' => $address, 'password' => $password] : null;
     }
 
     public static function eraseExpiredPasswords(): void

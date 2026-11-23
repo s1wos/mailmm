@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Http\Requests\BrowserCookies;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Cookie;
 use Symfony\Component\HttpFoundation\Response;
@@ -30,11 +31,12 @@ class GuestMailboxCookie
     {
         $prefix = self::prefix();
         foreach ($request->cookies as $name => $key) {
-            if (is_string($key) && str_starts_with($name, $prefix)) {
-                $parts = explode('_', substr($name, strlen($prefix)));
-                if (count($parts) === 2 && ctype_digit($parts[0]) && ctype_digit($parts[1])) {
-                    yield $name => [(int) $parts[0], (int) $parts[1], $key];
-                }
+            if (! str_starts_with($name, $prefix)) {
+                continue;
+            }
+            $parts = explode('_', substr($name, strlen($prefix)));
+            if (BrowserCookies::validMailboxCookie($parts, $key)) {
+                yield $name => [(int) $parts[0], (int) $parts[1], $key];
             }
         }
     }

@@ -93,20 +93,10 @@ export function useMailboxSync(store: ReturnType<typeof useEmailStore>) {
         if (available()) void bootstrap()
     }
 
-    async function bootstrap() {
+    function bootstrap() {
         if (!available()) { needsBootstrap = true; return }
         needsBootstrap = false
-        await store.refresh({ afterPending: true })
-        if (!mounted || store.reauthorizing) return
-        if (!store.mailbox) {
-            if (store.error === new SocketError('access_revoked').message) {
-                state.value = 'denied'
-            } else {
-                state.value = store.retryBootstrap ? 'recovering' : 'unavailable'
-                needsBootstrap = true
-                if (store.retryBootstrap) schedule(() => void bootstrap())
-            }
-        }
+        void store.refresh({ afterPending: true })
     }
 
     function attach(id: number | undefined) {
@@ -247,8 +237,14 @@ export function useMailboxSync(store: ReturnType<typeof useEmailStore>) {
         watch(() => store.socketMailboxId, (id, previous) => {
             if (id !== previous) guard.reset()
             attach(id)
-            if (!id && store.error === new SocketError('access_revoked').message) state.value = 'denied'
         }, { immediate: true })
+        watch([() => store.loading, () => store.rotating, () => store.bootstrapFailure], ([loading, rotating, failure]) => {
+            if (loading || rotating || !failure || store.socketMailboxId) return
+            state.value = failure
+            needsBootstrap = failure !== 'denied'
+            if (failure === 'recovering') schedule(bootstrap)
+            else clearRetry()
+        })
         watch(() => store.rotating, rotating => { if (!rotating && autoPending) void drain() })
         window.addEventListener('mailbox-session-changed', reloadContext)
         if (!store.reauthorizing) void bootstrap()

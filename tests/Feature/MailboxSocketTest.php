@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Console\Requests\MailboxSocketJobRequest;
 use App\Models\Email;
 use App\Models\User;
 use App\Services\MailboxSocketGrant;
@@ -11,6 +12,7 @@ use Closure;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Laravel\Reverb\Application;
@@ -52,6 +54,23 @@ class MailboxSocketTest extends TestCase
     {
         return app(MailboxSocketRead::class)->handle([...$context, 'command' => $command,
             'data' => [...['requestId' => (string) str()->uuid(), 'reason' => 'manual'], ...$data]]);
+    }
+
+    public function test_worker_validates_the_binding_and_payload_for_each_command(): void
+    {
+        $binding = ['grant' => 'opaque', 'socket' => '1.2', 'channel' => 'private-mailbox.1'];
+        $authorize = $binding + ['command' => 'mailbox.authorize'];
+        $check = $binding + ['command' => 'mailbox.check', 'data' => ['requestId' => 'check', 'reason' => 'auto']];
+        $page = $binding + ['command' => 'mailbox.page', 'data' => ['requestId' => 'next', 'continuation' => 'opaque']];
+        foreach ([$authorize, $check, $check + ['automatic' => true], $page] as $job) {
+            $this->assertTrue(MailboxSocketJobRequest::isValid($job, strlen(json_encode($job))));
+        }
+        foreach ([null, false, [], $binding, [...$authorize, 'socket' => []], [...$authorize, 'command' => 'unknown'],
+            $check + ['automatic' => 'false'], [...$check, 'data' => 'wrong type'], [...$check, 'data' => $page['data']],
+            [...$page, 'data' => $check['data']]] as $job) {
+            $this->assertFalse(MailboxSocketJobRequest::isValid($job, strlen(json_encode($job))));
+        }
+        $this->assertFalse(MailboxSocketJobRequest::isValid($authorize, MailboxSocketJobRequest::MAX_BYTES + 1));
     }
 
     private function wire(): WebSocketConnection
@@ -200,6 +219,24 @@ class MailboxSocketTest extends TestCase
         $this->post('/admin/logout')->assertRedirect();
         $this->assertFalse($authorized($replacement));
         $this->assertSame(0, $records());
+    }
+
+    public function test_existing_subscription_can_finish_on_its_original_grant_until_expiry(): void
+    {
+        $mailbox = Email::create(['email' => 'guest@test.invalid', 'expires_at' => now()->addDay()]);
+        $this->withSession(['email_id' => $mailbox->id]);
+        $current = $this->grant($mailbox->id);
+        [$group] = explode('.', $current['grant'], 2);
+        $cache = Cache::store(config('cache.limiter'));
+        $identity = $cache->get(MailboxSocketGrant::CACHE_PREFIX.'session:'.$group)['identity'];
+        $legacy = [...$current, 'grant' => bin2hex(random_bytes(32))];
+        $key = MailboxSocketGrant::CACHE_PREFIX.'grant:'.hash('sha256', $legacy['grant']);
+        $cache->put($key, $identity + ['socket' => $legacy['socket'], 'expiresAt' => now()->addMinute()->toISOString()], 60);
+
+        $this->assertSame(['authorized' => true], $this->read($legacy, command: 'mailbox.authorize'));
+        $this->travel(61)->seconds();
+        $this->assertSame(['code' => 'access_revoked'], $this->read($legacy, command: 'mailbox.authorize'));
+        $this->assertSame(['authorized' => true], $this->read($current, command: 'mailbox.authorize'));
     }
 
     public function test_waiting_for_a_revocation_releases_the_channel_at_the_grant_deadline(): void
@@ -449,6 +486,11 @@ class MailboxSocketTest extends TestCase
         $this->assertSame($this->getJson('/api/email')->headers->get('X-Inbox-Snapshot'), $first['snapshot']);
         $this->assertSame('rate_limited', $this->read($other)['code']);
         $this->assertSame('invalid_request', $this->read($other, ['continuation' => $first['continuation']], 'mailbox.page')['code']);
+        $damaged = Crypt::encryptString(json_encode([
+            'grant' => $context['grant'], 'expires' => now()->addMinute()->timestamp,
+            'snapshot' => $first['snapshot'], 'cursor' => 'invalid',
+        ], JSON_THROW_ON_ERROR));
+        $this->assertSame('invalid_request', $this->read($context, ['continuation' => $damaged], 'mailbox.page')['code']);
         $next = $this->read($context, ['continuation' => $first['continuation']], 'mailbox.page');
         $this->assertSame('Subject 31', $next['page']['data'][0]['subject']);
         $this->assertNull($next['continuation']);
@@ -457,6 +499,10 @@ class MailboxSocketTest extends TestCase
         $same = $this->read($context, ['snapshot' => $first['snapshot']]);
         $this->assertTrue($same['unchanged']);
         $this->assertArrayNotHasKey('page', $same);
+        $this->travel(5)->seconds();
+        $continuation = $this->read($context)['continuation'];
+        $this->travel(61)->seconds();
+        $this->assertSame('invalid_request', $this->read($context, ['continuation' => $continuation], 'mailbox.page')['code']);
     }
 
     public function test_a_stale_session_socket_or_closed_address_cannot_read_private_headers(): void
@@ -561,6 +607,12 @@ class MailboxSocketTest extends TestCase
         $send = fn ($i, $id, $reason = 'auto', $delivery = null) => $server->message($socket[$i], json_encode([
             'event' => 'mailbox.check', 'channel' => $channel, 'data' => ['requestId' => $id, 'reason' => $reason, 'deliveryId' => $delivery],
         ]));
+        $send(0, 'invalid id');
+        $this->assertSame([], $wire[0]->frames);
+        $send(0, 'invalid-delivery', 'delivery', '55');
+        $this->assertSame(['requestId' => 'invalid-delivery', 'code' => 'invalid_request'], end($wire[0]->frames)['data']);
+        $this->assertSame([], $pending);
+        $wire[0]->frames = [];
         $send(0, 'first');
         $send(1, 'parallel');
         $this->assertCount(2, $pending);
@@ -619,10 +671,13 @@ class MailboxSocketTest extends TestCase
 
     public function test_slow_worker_times_out_while_another_socket_completes_its_read(): void
     {
-        $token = bin2hex(random_bytes(32));
-        $key = MailboxSocketGrant::CACHE_PREFIX.'grant:'.hash('sha256', $token);
+        config(['cache.limiter' => 'file']);
+        $mailbox = Email::create(['email' => 'slow@test.invalid', 'expires_at' => now()->addDay()]);
+        $this->withSession(['email_id' => $mailbox->id]);
+        $slow = $this->grant($mailbox->id, '1.2');
+        [$group] = explode('.', $slow['grant'], 2);
+        $key = MailboxSocketGrant::CACHE_PREFIX.'session:'.$group;
         $cache = Cache::store('file');
-        $cache->put($key, [], 30);
         $file = fopen($cache->getStore()->path($key), 'rb');
         $this->assertTrue(flock($file, LOCK_EX));
         $environment = $_ENV['CACHE_STORE'] ?? null;
@@ -630,9 +685,8 @@ class MailboxSocketTest extends TestCase
         try {
             $pool = new MailboxSocketPool;
             $answers = [];
-            foreach (['slow' => $token, 'fast' => 'missing'] as $id => $grant) {
-                $job = ['grant' => $grant, 'socket' => '1.2', 'channel' => 'private-mailbox.1',
-                    'command' => 'mailbox.check', 'data' => ['requestId' => $id, 'reason' => 'manual']];
+            foreach (['slow' => $slow['grant'], 'fast' => 'missing.group'] as $id => $grant) {
+                $job = [...$slow, 'grant' => $grant, 'command' => 'mailbox.check', 'data' => ['requestId' => $id, 'reason' => 'manual']];
                 $pool->submit($job, function ($reply) use (&$answers, $id) {
                     $answers[$id] = $reply['code'];
                 });

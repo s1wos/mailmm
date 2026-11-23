@@ -5,12 +5,15 @@ import PanelHeading from './PanelHeading.vue'
 import PanelIcon from './PanelIcon.vue'
 import PanelLetters from './PanelLetters.vue'
 import PanelPagination from './PanelPagination.vue'
+import PanelPasswordForm from './PanelPasswordForm.vue'
 import { formatCount } from './format'
 import type { ArchivePage } from './types'
+import { usePanelForm } from './usePanelForm'
 
 const props = defineProps<{ page: ArchivePage, refresh?: 'loading' | 'failed' }>()
 defineEmits<{ retry: [] }>()
 const router = useRouter()
+const passwordForm = usePanelForm()
 const recipient = ref(props.page.recipient)
 watch(() => props.page.recipient, value => { recipient.value = value })
 
@@ -26,7 +29,11 @@ function search() {
         :user="page.user"
         :description="page.user.is_admin ? undefined : page.user.email"
     />
-    <form v-if="page.user.is_admin" class="card search-form" method="get" action="/admin/archive" @submit.prevent="search">
+    <details v-if="!page.user.is_admin" class="owner-password">
+        <summary class="button secondary"><PanelIcon name="key-round" />Сменить пароль</summary>
+        <PanelPasswordForm class="card form-card" action="/admin/account/password" :form="passwordForm" />
+    </details>
+    <form v-else class="card search-form" method="get" action="/admin/archive" @submit.prevent="search">
         <label for="recipient">Поиск по получателю</label>
         <div class="search-row">
             <span class="input-icon">

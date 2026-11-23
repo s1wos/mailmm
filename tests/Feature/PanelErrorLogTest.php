@@ -59,10 +59,17 @@ class PanelErrorLogTest extends TestCase
 
     public function test_a_damaged_cursor_is_reported_as_invalid_input(): void
     {
+        $this->withoutVite();
         $this->actingAs(User::factory()->create(['is_admin' => true]));
         $cursor = base64_encode('{"_pointsToNextItems":true}');
-        $this->getJson('/admin/errors?'.http_build_query(['cursor' => $cursor]))
-            ->assertUnprocessable()->assertJsonValidationErrors('cursor');
+        foreach ([$cursor, ['unexpected']] as $invalid) {
+            $url = '/admin/errors?'.http_build_query(['cursor' => $invalid]);
+            $this->get($url)->assertOk()->assertSee('id="app"', false);
+            $this->getJson($url)->assertUnprocessable()
+                ->assertJsonPath('errors.cursor.0', 'Некорректная страница журнала.');
+        }
+        $this->json('GET', '/admin/errors', ['cursor' => $cursor])->assertUnprocessable()
+            ->assertJsonPath('errors.cursor.0', 'Некорректная страница журнала.');
     }
 
     private function entry(int $id, string $occurredAt = '2026-11-22 06:00:00.123456+05:00'): array

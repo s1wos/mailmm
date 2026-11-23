@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\PanelLoginRequest;
 use App\Http\Responses\PanelResponse;
 use App\Models\User;
 use App\Services\MailboxSocketGrant;
@@ -20,20 +21,15 @@ class PanelLoginController extends Controller
         return response()->json(['user' => PanelResponse::user($request)]);
     }
 
-    public function show(Request $request): View|JsonResponse|RedirectResponse
+    public function show(Request $request): View|JsonResponse
     {
-        return $request->user()
-            ? PanelResponse::redirect($request, route('panel.index', absolute: false))
-            : PanelResponse::screen($request, 'login');
+        return PanelResponse::screen($request, 'login');
     }
 
-    public function login(Request $request): JsonResponse|RedirectResponse
+    public function login(PanelLoginRequest $request): JsonResponse|RedirectResponse
     {
         $index = route('panel.index', absolute: false);
-        if ($request->user()) {
-            return PanelResponse::redirect($request, $index);
-        }
-        $credentials = $request->validate(['email' => ['required', 'email', 'max:254'], 'password' => ['required', 'string']]);
+        $credentials = $request->validated();
         $credentials['email'] = Str::lower($credentials['email']);
         if (! Auth::attemptWhen($credentials, function (User $user) use ($request) {
             if (! $user->is_admin && ! $user->mailbox()->active()->exists()) {
@@ -48,11 +44,8 @@ class PanelLoginController extends Controller
 
         $intended = $request->session()->pull('url.intended', '');
         $path = Str::after($intended, $request->root());
-        if (! preg_match('~^/admin(?:/|\?|$)~', $path)) {
-            $path = $index;
-        }
 
-        return PanelResponse::redirect($request, $path);
+        return PanelResponse::redirect($request, preg_match('~^/admin(?:/|\?|$)~', $path) ? $path : $index);
     }
 
     public function logout(Request $request): JsonResponse|RedirectResponse

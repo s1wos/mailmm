@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
+import MailboxCredentials from './MailboxCredentials.vue'
 import PanelHeading from './PanelHeading.vue'
 import PanelIcon from './PanelIcon.vue'
 import PanelPagination from './PanelPagination.vue'
 import type { MailboxesPage } from './types'
 import { usePanelForm } from './usePanelForm'
 
-const props = defineProps<{ page: MailboxesPage }>()
-const emit = defineEmits<{ navigate: [path: string] }>()
+type Credentials = NonNullable<MailboxesPage['credentials']>
+
+const props = defineProps<{ page: MailboxesPage, awaitingPage?: boolean }>()
+const emit = defineEmits<{ navigate: [path: string], credentialsIssued: [credentials: Credentials] }>()
 const createPath = '/admin/mailboxes'
-const requestId = props.page.request_id
 const options = ref(props.page.domains)
 const domain = ref(options.value[0]?.domain ?? '')
 const { state, submit, messageFor } = usePanelForm(() => props.page.user.is_admin, error => {
@@ -17,6 +19,9 @@ const { state, submit, messageFor } = usePanelForm(() => props.page.user.is_admi
 })
 const localPart = ref('')
 const format = ref('random')
+const createButton = ref<HTMLButtonElement>()
+const receiptAbove = ref(false)
+const createdCredentials = computed(() => props.page.credentials?.resetMailboxId ? null : props.page.credentials)
 const selectedDomain = computed(() => options.value.find(option => option.domain === domain.value))
 const anyWords = computed(() => options.value.some(option => option.formats.includes('words')))
 const supportsWords = computed(() => selectedDomain.value?.formats.includes('words'))
@@ -29,29 +34,33 @@ watch(supportsWords, supported => {
     if (!supported) format.value = 'random'
 })
 
+watch(createdCredentials, async credentials => {
+    const button = createButton.value
+    if (!button || (!credentials && !props.awaitingPage)) return
+    const { top, bottom } = button.getBoundingClientRect()
+    if (bottom <= 0 || top >= window.innerHeight) return
+    if (credentials) receiptAbove.value = top > window.innerHeight / 2
+    // Removing the previous receipt and growing the list on mobile can both move the button.
+    await nextTick()
+    if (button.isConnected) window.scrollBy(0, button.getBoundingClientRect().top - top)
+})
+
 function passwordPath(id: number) {
     return '/admin/mailboxes/' + id + '/password'
 }
 
-async function issue(event: SubmitEvent) {
-    const result = await submit(event)
-    if (result?.redirect) emit('navigate', result.redirect)
+async function issue(event: SubmitEvent, resetMailboxId?: number) {
+    const result = await submit<{ credentials?: Credentials, redirect?: string }>(event)
+    if (result?.credentials) emit('credentialsIssued', { ...result.credentials, resetMailboxId })
+    else if (result?.redirect) {
+        localPart.value = ''
+        emit('navigate', result.redirect)
+    }
 }
 </script>
 
 <template>
     <PanelHeading title="Ящики" :user="page.user" />
-    <section v-if="page.credentials" class="card notice credentials" aria-labelledby="issued-title">
-        <span class="tile-icon violet"><PanelIcon name="key-round" /></span>
-        <div>
-            <h2 id="issued-title">Данные для входа</h2>
-            <p>Сохраните пароль и передайте владельцу. Пароль показывается один раз.</p>
-            <dl class="detail-list">
-                <div><dt>Логин</dt><dd><code>{{ page.credentials.email }}</code></dd></div>
-                <div><dt>Пароль</dt><dd><code>{{ page.credentials.password }}</code></dd></div>
-            </dl>
-        </div>
-    </section>
     <div class="management-grid">
         <section class="card boxes-card">
             <div class="card-heading"><h2>Постоянные ящики</h2></div>
@@ -63,12 +72,14 @@ async function issue(event: SubmitEvent) {
                     </div>
                     <details class="key-options">
                         <summary><PanelIcon name="key-round" />Новый пароль</summary>
-                        <form method="post" :action="passwordPath(box.id)" @submit.prevent="issue">
+                        <form method="post" :action="passwordPath(box.id)" @submit.prevent="issue($event, box.id)">
+                            <input type="hidden" name="return_credentials" value="1">
                             <p>После перевыпуска прежний пароль владельца перестанет действовать.</p>
                             <p v-if="messageFor(passwordPath(box.id))" class="error" role="alert">{{ state.message }}</p>
-                            <button type="submit" class="button secondary" :disabled="state.pending">Перевыпустить пароль</button>
+                            <button type="submit" class="button secondary" :disabled="state.pending || awaitingPage">Перевыпустить пароль</button>
                         </form>
                     </details>
+                    <MailboxCredentials v-if="page.credentials?.resetMailboxId === box.id" :credentials="page.credentials" />
                 </li>
                 <li v-if="!page.mailboxes.data.length" class="empty-state">
                     <span class="empty-icon"><PanelIcon name="mails" /></span><strong>Пока нет постоянных ящиков</strong>
@@ -78,10 +89,11 @@ async function issue(event: SubmitEvent) {
         </section>
         <section id="create-mailbox" class="card form-card">
             <span class="large-icon"><PanelIcon name="plus" /></span><h2>Создать ящик</h2>
-            <template v-if="options.length">
-                <p class="description">Владелец получит постоянный адрес и пароль для входа.</p>
-                <form class="stack-form" method="post" :action="createPath" @submit.prevent="issue">
-                    <input type="hidden" name="request_id" :value="requestId">
+            <p v-if="options.length" class="description">Владелец получит постоянный адрес и пароль для входа.</p>
+            <p v-else class="description">Добавьте почтовый домен в <RouterLink to="/admin/settings">настройках</RouterLink>, чтобы создать ящик.</p>
+            <form v-if="options.length || createdCredentials" class="stack-form" method="post" :action="createPath" @submit.prevent="issue">
+                <template v-if="options.length">
+                    <input type="hidden" name="request_id" :value="page.request_id">
                     <div>
                         <label for="mailbox-domain">Домен</label>
                         <select id="mailbox-domain" v-model="domain" name="domain" required
@@ -111,10 +123,15 @@ async function issue(event: SubmitEvent) {
                     </div>
                     <p v-if="messageFor(createPath)" class="error" role="alert">{{ state.message }}</p>
                     <p v-if="state.fields.request_id" class="error" role="alert">{{ state.fields.request_id[0] }}</p>
-                    <button type="submit" class="button primary" :disabled="state.pending"><PanelIcon name="plus" />Создать ящик</button>
-                </form>
-            </template>
-            <p v-else class="description">Добавьте почтовый домен в <RouterLink to="/admin/settings">настройках</RouterLink>, чтобы создать ящик.</p>
+                    <button ref="createButton" type="submit" class="button primary create-submit" :disabled="state.pending || awaitingPage"><PanelIcon name="plus" />Создать ящик</button>
+                </template>
+                <MailboxCredentials v-if="createdCredentials" :class="{ 'after-submit': !receiptAbove }" :credentials="createdCredentials" />
+            </form>
         </section>
     </div>
 </template>
+
+<style scoped>
+.create-submit { order: 1; }
+.after-submit { order: 2; }
+</style>

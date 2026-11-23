@@ -2,10 +2,12 @@
 
 namespace App\Console\Commands;
 
+use App\Console\Requests\CreateMailAdminRequest;
 use App\Models\User;
 use Illuminate\Console\Command;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 class CreateMailAdmin extends Command
 {
@@ -15,15 +17,14 @@ class CreateMailAdmin extends Command
 
     public function handle(): int
     {
-        $email = Str::lower(trim($this->argument('email')));
-        if (! filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($email) > 254 || User::whereEmail($email)->exists()) {
-            $this->error('Supply a valid email address that is not already registered.');
-
-            return self::FAILURE;
-        }
-        $password = $this->secret('Password (at least 12 characters)');
-        if (! is_string($password) || mb_strlen($password, 'UTF-8') < 12 || strlen($password) > 72 || $password !== $this->secret('Confirm password')) {
-            $this->error('Enter matching passwords of at least 12 characters and at most 72 bytes.');
+        try {
+            $email = Str::lower(trim($this->argument('email')));
+            CreateMailAdminRequest::validateEmail($email);
+            $password = $this->secret('Password (at least 12 characters)');
+            CreateMailAdminRequest::validatePassword($password);
+            CreateMailAdminRequest::validateConfirmation($password, $this->secret('Confirm password'));
+        } catch (ValidationException $error) {
+            $this->error($error->getMessage());
 
             return self::FAILURE;
         }

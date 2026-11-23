@@ -13,7 +13,11 @@ const guard = useActionGuard(() => store.isAdmin)
 const dialog = ref<HTMLDialogElement | null>(null)
 const domainSelect = ref<HTMLSelectElement | null>(null)
 const cancelButton = ref<HTMLButtonElement | null>(null)
-const domain = ref('')
+const preferredDomain = ref('')
+const domain = computed({
+    get: () => store.domainOptions.some(option => option.domain === preferredDomain.value) ? preferredDomain.value : '',
+    set: (value: string) => { preferredDomain.value = value },
+})
 const format = ref<AddressFormat>('random')
 const choiceError = ref('')
 const formats = computed(() => [...new Set(store.domainOptions
@@ -49,9 +53,6 @@ const remaining = computed(() => {
 const expiryDate = new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
 const fraction = computed(() => Math.min(1, Math.max(0, (Date.parse(store.mailbox?.expires_at ?? '') - props.now) / 86400000)))
 const secondHandAngle = computed(() => (Math.floor(props.now / 1000) % 60) * 6 + 'deg')
-watch(() => store.domainOptions, options => {
-    if (!options.some(option => option.domain === domain.value)) domain.value = ''
-})
 watch(formats, available => {
     if (!available.includes(format.value)) format.value = 'random'
 })
@@ -181,7 +182,10 @@ async function confirmRotation() {
         <p id="reset-description">После смены адреса вы потеряете доступ к письмам и вложениям текущего ящика.</p>
         <form @submit.prevent="guard.run('rotate', 1000, confirmRotation)">
             <div class="address-field">
-                <label for="address-domain">Домен</label>
+                <div>
+                    <label for="address-domain">Домен</label>
+                    <span class="domain-loading" :class="{ 'sizing-label': !store.optionsLoading }" role="status">Загружаем домены…</span>
+                </div>
                 <select id="address-domain" ref="domainSelect" v-model="domain" :disabled="store.optionsLoading || store.rotating || !store.domainOptions.length">
                     <option value="">Случайный домен</option>
                     <option v-for="option in store.domainOptions" :key="option.domain" :value="option.domain">{{ option.domain }}</option>
@@ -197,14 +201,16 @@ async function confirmRotation() {
             </div>
             <p v-if="format === 'words'" class="address-example">Пример адреса — <bdi>mint.fox@inbox.test</bdi></p>
             <p v-if="choiceError" role="alert">{{ choiceError }}</p>
-            <p v-if="store.optionsLoading" role="status">Загружаем домены…</p>
-            <p v-else-if="store.optionsError" role="alert">{{ store.optionsError }}
+            <p v-if="store.optionsError" role="alert">{{ store.optionsError }}
                 <button type="button" class="text-btn" :aria-disabled="guard.blocked('options') || undefined" @click="loadOptions">Повторить</button>
             </p>
-            <p v-else-if="!store.domainOptions.length && !choiceError" role="status">Нет доступных доменов для выдачи адреса.</p>
+            <p v-else-if="!store.optionsLoading && !store.domainOptions.length && !choiceError" role="status">Нет доступных доменов для выдачи адреса.</p>
             <div class="modal-actions">
                 <button ref="cancelButton" autofocus type="button" class="btn neutral-btn" :disabled="store.rotating" @click="dialog?.close()">Отмена</button>
-                <button type="submit" class="btn solid-btn" :disabled="!canConfirm" :aria-disabled="guard.blocked('rotate') || undefined">{{ store.rotating ? 'Меняем адрес…' : 'Сменить адрес' }}</button>
+                <button type="submit" class="btn solid-btn rotate-submit" :disabled="!canConfirm" :aria-disabled="guard.blocked('rotate') || undefined">
+                    <span :class="{ 'sizing-label': store.rotating }">Сменить адрес</span>
+                    <span :class="{ 'sizing-label': !store.rotating }">Меняем адрес…</span>
+                </button>
             </div>
         </form>
     </dialog>
@@ -213,12 +219,17 @@ async function confirmRotation() {
 <style scoped>
 .modal { --action-spacing: 20px; padding-bottom: var(--action-spacing); }
 .address-field { display: grid; gap: 6px; margin-bottom: 14px; font-size: 14px; font-weight: 600; }
+.domain-loading { margin-inline-start: .5em; color: var(--mm-muted); font-weight: 400; }
 .address-field select {
     width: 100%; min-width: 0; padding: 9px 10px; font: inherit; font-weight: 400; color: var(--mm-ink);
     background: var(--mm-surface); border: 1px solid var(--mm-line); border-radius: 9px;
 }
 .address-example { overflow-wrap: anywhere; }
 .modal-actions { margin-top: var(--action-spacing); }
+.modal-actions .btn:is(:hover, :active) { transform: none; }
+.rotate-submit { display: inline-grid; }
+.rotate-submit > span { grid-area: 1 / 1; }
+.sizing-label { visibility: hidden; }
 @container (width > 550px) {
     .address-value { max-width: 71%; }
 }

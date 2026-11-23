@@ -80,6 +80,7 @@ class MailboxSocketGrant
             }
             $grant = $stored['identity'] + ['socket' => $socket, 'expiresAt' => $binding['grantExpiresAt']];
         } else {
+            // Read old grants until they expire. New authorizations use session bindings.
             $grant = $cache->get(self::CACHE_PREFIX.'grant:'.hash('sha256', $token));
         }
         if (! $grant || $grant['socket'] !== $socket || $channel !== 'private-mailbox.'.$grant['mailbox']

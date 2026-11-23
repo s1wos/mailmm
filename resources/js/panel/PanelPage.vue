@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { finishScrollRestoration } from '../router/scroll'
 import { useEmailStore } from '../stores/emailStore'
 import { useActionGuard, useNavigationGuard } from '../useActionGuard'
 import { notifyMailboxSessionChanged } from '../mailboxSocket'
@@ -27,6 +28,10 @@ const user = shallowRef<PanelUser | null>(null)
 const tabCache = new Map<string, { data: PanelPageData, fetchedAt: number }>()
 const tabFreshnessMs = 60_000
 const restoredTab = ref(false)
+const changingQuery = ref(false)
+const correctionHeight = ref<number>()
+const mailboxFormKey = ref(0)
+let receiptTarget = ''
 const tabRefreshFailed = ref(false)
 let navigationTarget = ''
 const actions = useActionGuard(() => !!user.value?.is_admin)
@@ -34,7 +39,6 @@ const navigation = useNavigationGuard(() => !!user.value?.is_admin, url => {
     navigationTarget = url.pathname + url.search
 })
 const error = ref('')
-const notice = ref('')
 const errorRefreshFailed = ref(false)
 const listRefresh = ref<'loading' | 'failed'>()
 const signingOut = ref(false)
@@ -71,6 +75,8 @@ function resetAccount() {
     clearTimeout(expiryTimer)
     tabCache.clear()
     restoredTab.value = false
+    changingQuery.value = false
+    receiptTarget = ''
     tabRefreshFailed.value = false
     listRefresh.value = undefined
     actions.reset()
@@ -81,7 +87,6 @@ function resetAccount() {
     page.value = null
     user.value = null
     setPanelUser(null)
-    notice.value = ''
     mailbox.resetSession()
 }
 
@@ -104,14 +109,20 @@ async function authenticated(fallback: string) {
     }
 }
 
-async function focusContent() {
+async function contentReady(focus = true) {
+    const target = route.fullPath
     await nextTick()
-    if (route.hash) document.getElementById(route.hash.slice(1))?.scrollIntoView()
-    else if (page.value?.screen === 'login') main.value?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true })
-    else main.value?.focus({ preventScroll: true })
+    if (target !== route.fullPath) return
+    if (focus) {
+        if (route.hash) document.getElementById(route.hash.slice(1))?.scrollIntoView()
+        else if (page.value?.screen === 'login') main.value?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true })
+        else main.value?.focus({ preventScroll: true })
+    }
+    finishScrollRestoration(target)
 }
 
 function applyResponse(data: PanelPageData) {
+    correctionHeight.value = undefined
     if (data.user?.is_admin && panelTabs.includes(path.value) && !(data.screen === 'mailboxes' && data.credentials)) {
         tabCache.set(path.value, { data, fetchedAt: Date.now() })
     }
@@ -137,26 +148,30 @@ function syncClock(serverTime: string, refreshStartedAt?: number) {
     } else if (time > now) mailbox.setClock(serverTime)
 }
 
-async function load(message = '', mode: 'reload' | 'navigate' | 'retry' = 'reload') {
+async function load(mode: 'reload' | 'navigate' | 'retry' = 'reload', sameSection = false) {
     clearTimeout(expiryTimer)
     listRefresh.value = undefined
     currentRequest?.abort()
     const cached = mode !== 'reload' && !checkAfterLoad ? tabCache.get(path.value) : undefined
+    if (!sameSection || cached) correctionHeight.value = undefined
+    const previous = (sameSection || (mode === 'retry' && tabRefreshFailed.value)) && !checkAfterLoad ? page.value : null
     const interactive = mode === 'retry' || navigationTarget === path.value
     navigationTarget = ''
     restoredTab.value = !!cached
     tabRefreshFailed.value = false
-    page.value = cached?.data ?? null
+    changingQuery.value = !!previous && !cached
+    page.value = cached?.data ?? (previous?.screen === 'mailboxes' && previous.credentials
+        ? { ...previous, credentials: null } : previous)
     error.value = ''
-    notice.value = message
-    document.title = (cached ? title(cached.data) : 'Панель') + ' · mailmm'
+    document.title = (page.value ? title(page.value) : 'Панель') + ' · mailmm'
     if (menu.value) menu.value.open = false
     if (cached) {
         checkExpiry()
-        void focusContent()
+        void contentReady(!sameSection || !!route.hash)
         // The journal polls on its own, and expiry can already have started a list refresh.
         if (cached.data.screen === 'errors' || listRefresh.value || (mode !== 'retry' && Date.now() - cached.fetchedAt < tabFreshnessMs)) return
     }
+    if (changingQuery.value) checkExpiry()
     const refreshStartedAt = cached ? mailbox.serverNow() : undefined
     const request = new AbortController()
     currentRequest = request
@@ -194,15 +209,23 @@ async function load(message = '', mode: 'reload' | 'navigate' | 'retry' = 'reloa
         setPanelUser(data.user?.id ?? null)
         if (goToLastPage(data)) return
         applyResponse(data)
+        changingQuery.value = false
         document.title = title(data) + ' · mailmm'
         checkExpiry()
-        if (!cached) await focusContent()
+        if (!cached) await contentReady(!previous || !!route.hash)
     } catch (cause) {
         if (request.signal.aborted) return
-        if (cached && (!(cause instanceof PanelHttpError) || cause.status >= 500 || cause.status === 429)) {
+        correctionHeight.value = undefined
+        if ((cached || previous) && (!(cause instanceof PanelHttpError) || cause.status >= 500 || cause.status === 429)) {
             tabRefreshFailed.value = true
+            if (checkAfterLoad) {
+                checkAfterLoad = false
+                void checkSession()
+            }
+            await contentReady(false)
             return
         }
+        changingQuery.value = false
         if (cause instanceof PanelHttpError && cause.status === 401 && route.path !== '/admin/login') {
             await requireLogin()
             return
@@ -211,9 +234,12 @@ async function load(message = '', mode: 'reload' | 'navigate' | 'retry' = 'reloa
         if (cause instanceof PanelHttpError && (cause.status === 403 || cause.status === 404)) {
             tabCache.clear()
             page.value = null
+            checkAfterLoad = false
             void checkSession()
         }
-        await focusContent()
+        await contentReady()
+    } finally {
+        if (currentRequest === request && !tabRefreshFailed.value) changingQuery.value = false
     }
 }
 
@@ -221,6 +247,9 @@ function goToLastPage(data: PanelPageData) {
     const list = data.screen === 'archive' ? data.messages : data.screen === 'temporary-mailboxes' ? data.mailboxes : null
     if (!list || list.current_page <= list.last_page) return false
     const last = list.last_page
+    // Remove obsolete rows immediately but keep their space until the replacement page arrives.
+    correctionHeight.value = main.value?.offsetHeight
+    page.value = data
     tabCache.delete(route.path)
     void router.replace({ path: route.path, query: { ...route.query, page: last > 1 ? last : undefined }, hash: route.hash })
     return true
@@ -228,7 +257,7 @@ function goToLastPage(data: PanelPageData) {
 
 async function refreshList() {
     const screen = page.value?.screen
-    if ((screen !== 'archive' && screen !== 'temporary-mailboxes') || listRefresh.value === 'loading') return
+    if (changingQuery.value || (screen !== 'archive' && screen !== 'temporary-mailboxes') || listRefresh.value === 'loading') return
     listRefresh.value = 'loading'
     tabRefreshFailed.value = false
     currentRequest?.abort()
@@ -309,7 +338,7 @@ async function accountChanged(account: PanelUser | null) {
 async function checkSession() {
     checkExpiry()
     if (document.hidden) return
-    if (!page.value && !error.value) {
+    if ((changingQuery.value && !tabRefreshFailed.value) || (!page.value && !error.value)) {
         tabCache.clear()
         checkAfterLoad = true
         return
@@ -351,7 +380,7 @@ function restoreDocument(event: PageTransitionEvent) {
     else checkExpiry()
 }
 
-watch(() => page.value?.screen === 'errors' && !route.query.cursor, (live, _, onCleanup) => {
+watch(() => page.value?.screen === 'errors' && !route.query.cursor && !changingQuery.value, (live, _, onCleanup) => {
     if (!live) return
     const request = new AbortController()
     let pending = false
@@ -389,8 +418,22 @@ watch(() => page.value?.screen === 'errors' && !route.query.cursor, (live, _, on
     })
 }, { flush: 'sync' })
 
-watch(path, () => { if (route.meta.panel) void load('', 'navigate') }, { immediate: true })
-watch(() => route.hash, async hash => { if (hash && page.value) await focusContent() })
+function openReceipt(url: string) {
+    const target = router.resolve(url)
+    const current = page.value
+    const query = current?.screen === 'mailboxes' && current.mailboxes.current_page > 1
+        ? { ...target.query, page: current.mailboxes.current_page } : target.query
+    receiptTarget = router.resolve({ path: target.path, query }).fullPath
+    void router.push(receiptTarget)
+}
+
+watch(path, (next, previous) => {
+    if (!route.meta.panel) return
+    if (next !== receiptTarget) mailboxFormKey.value++
+    receiptTarget = ''
+    void load('navigate', previous?.split('?')[0] === route.path)
+}, { immediate: true })
+watch(() => route.hash, hash => { if (page.value && !changingQuery.value) void contentReady(!!hash) })
 onMounted(() => {
     window.addEventListener('focus', checkSession)
     window.addEventListener('pagehide', resetAccount)
@@ -427,11 +470,12 @@ onBeforeUnmount(() => {
                 </details>
             </div>
         </template>
-        <main id="content" ref="main" :class="[user ? 'page' : 'login-wrap', { 'restored-tab': restoredTab }]" tabindex="-1" @submit.capture="invalidateOnSubmit">
-            <p v-if="notice" class="notice success" role="status"><PanelIcon name="check" />{{ notice }}</p>
+        <main id="content" ref="main" :class="[user ? 'page' : 'login-wrap', { 'restored-tab': restoredTab }]" tabindex="-1"
+            :style="correctionHeight ? { minHeight: correctionHeight + 'px' } : undefined"
+            :inert="changingQuery && !tabRefreshFailed" :aria-busy="(changingQuery && !tabRefreshFailed) || undefined" @submit.capture="invalidateOnSubmit">
             <div v-if="error" class="card form-card" role="alert">
                 <p>{{ error }}</p>
-                <button class="button secondary" :aria-disabled="actions.blocked(path) || undefined" @click="actions.run(path, 1000, () => load('', 'retry'))">Повторить</button>
+                <button class="button secondary" :aria-disabled="actions.blocked(path) || undefined" @click="actions.run(path, 1000, () => load('retry'))">Повторить</button>
                 <RouterLink class="text-action" to="/admin">В панель</RouterLink>
             </div>
             <Login v-else-if="page?.screen === 'login'" :page="page" @authenticated="authenticated" />
@@ -439,13 +483,15 @@ onBeforeUnmount(() => {
             <Errors v-else-if="page?.screen === 'errors'" :page="page" :refresh-failed="errorRefreshFailed" />
             <Archive v-else-if="page?.screen === 'archive'" :page="page" :refresh="listRefresh" @retry="refreshList" />
             <Message v-else-if="page?.screen === 'message'" :page="page" />
-            <Mailboxes v-else-if="page?.screen === 'mailboxes'" :key="path" :page="page" @navigate="router.push($event)" />
-            <TemporaryMailboxes v-else-if="page?.screen === 'temporary-mailboxes'" :page="page" :refresh="listRefresh" @refresh="refreshList" />
-            <Settings v-else-if="page?.screen === 'settings'" :page="page" @updated="load" />
+            <Mailboxes v-else-if="page?.screen === 'mailboxes'" :key="mailboxFormKey" :page="page" :awaiting-page="changingQuery" @navigate="openReceipt"
+                @credentials-issued="page = { ...page, credentials: $event }" />
+            <TemporaryMailboxes v-else-if="page?.screen === 'temporary-mailboxes'" :page="page" :refresh="listRefresh"
+                @refresh="changingQuery && tabRefreshFailed ? load('retry') : refreshList()" />
+            <Settings v-else-if="page?.screen === 'settings'" :page="page" @domains-updated="page = { ...page, domains: $event }" />
             <p v-else role="status">Загрузка…</p>
             <p v-if="tabRefreshFailed" class="notice" role="status">
                 Не удалось обновить данные. Показана сохранённая версия.
-                <button class="button secondary" @click="load('', 'retry')">Повторить</button>
+                <button class="button secondary" @click="load('retry')">Повторить</button>
             </p>
         </main>
     </div>

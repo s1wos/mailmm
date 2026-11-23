@@ -263,6 +263,24 @@ class PanelDashboardTest extends TestCase
         $this->postJson('/admin/mailboxes/'.$guest->id.'/password')->assertNotFound();
     }
 
+    public function test_admin_can_request_reset_credentials_directly_for_the_mailbox_owner(): void
+    {
+        $admin = User::factory()->create(['is_admin' => true]);
+        $owner = User::factory()->create(['password' => 'previous-owner-password']);
+        $mailbox = $owner->mailbox()->create(['email' => $owner->email]);
+
+        $response = $this->actingAs($admin)->postJson('/admin/mailboxes/'.$mailbox->id.'/password', ['return_credentials' => '1'])
+            ->assertOk()->assertJsonPath('credentials.email', $owner->email)
+            ->assertJsonMissingPath('ticket')->assertHeaderContains('Cache-Control', 'no-store');
+        $this->assertStringNotContainsString('ticket=', $response->json('redirect') ?? '');
+        $this->assertNotSame('previous-owner-password', $response->json('credentials.password'));
+
+        $this->useBrowserSession(Str::random(40));
+        $login = $this->postJson('/admin/login', $response->json('credentials'))->assertOk();
+        $this->useBrowserSession($login->getCookie(config('session.cookie'))->getValue());
+        $this->getJson('/admin/session')->assertOk()->assertJsonPath('user.id', $owner->id);
+    }
+
     public function test_password_change_keeps_only_the_current_admin_authenticated_across_panel_and_api(): void
     {
         $admin = User::factory()->create(['is_admin' => true, 'password' => 'starting-password']);
@@ -283,6 +301,64 @@ class PanelDashboardTest extends TestCase
         $this->useBrowserSession($old);
         $this->getJson('/api/messages')->assertUnauthorized();
         $this->get('/admin/settings')->assertRedirect('/admin/login');
+    }
+
+    public function test_owner_password_change_requires_an_active_permanent_mailbox(): void
+    {
+        $path = '/admin/account/password';
+        $this->getJson('/api/email')->assertOk();
+        $this->putJson($path)->assertUnauthorized();
+
+        $admin = User::factory()->create(['is_admin' => true]);
+        $admin->mailbox()->create(['email' => $admin->email]);
+        $this->actingAs($admin)->putJson($path)->assertForbidden();
+
+        $owner = User::factory()->create();
+        $this->actingAs($owner)->putJson($path)->assertForbidden();
+        $box = $owner->mailbox()->create(['email' => $owner->email, 'expires_at' => now()->addDay()]);
+        $this->putJson($path)->assertForbidden();
+        $box->update(['expires_at' => null, 'closed_at' => now()]);
+        $this->putJson($path)->assertForbidden();
+    }
+
+    public function test_owner_password_change_requires_the_current_password_and_a_confirmed_new_password(): void
+    {
+        $owner = User::factory()->create(['password' => 'issued-password']);
+        $owner->mailbox()->create(['email' => $owner->email]);
+        $this->actingAs($owner);
+        $data = ['current_password' => 'issued-password', 'password' => 'my-new-password', 'password_confirmation' => 'my-new-password'];
+        $this->putJson('/admin/account/password', [...$data, 'current_password' => 'incorrect'])
+            ->assertUnprocessable()->assertJsonValidationErrors('current_password');
+        $this->putJson('/admin/account/password', [...$data, 'password_confirmation' => 'different-password'])
+            ->assertUnprocessable()->assertJsonValidationErrors('password');
+        foreach (['short', str_repeat('я', 37), "new-password\0suffix"] as $invalid) {
+            $this->putJson('/admin/account/password', [...$data, 'password' => $invalid, 'password_confirmation' => $invalid])
+                ->assertUnprocessable()->assertJsonValidationErrors('password');
+        }
+        $this->assertTrue(Hash::check('issued-password', $owner->fresh()->password));
+    }
+
+    public function test_owner_password_change_preserves_current_access_and_revokes_other_sessions_and_the_old_password(): void
+    {
+        $owner = User::factory()->create(['password' => 'issued-password']);
+        $box = $owner->mailbox()->create(['email' => $owner->email]);
+        $credentials = ['email' => $owner->email, 'password' => 'issued-password'];
+        $cookie = config('session.cookie');
+        $old = $this->postJson('/admin/login', $credentials)->assertOk()->getCookie($cookie)->getValue();
+        $this->useBrowserSession(Str::random(40));
+        $current = $this->postJson('/admin/login', $credentials)->assertOk()->getCookie($cookie)->getValue();
+        $this->useBrowserSession($current);
+        $changed = $this->putJson('/admin/account/password', [
+            'current_password' => 'issued-password', 'password' => 'my-new-password', 'password_confirmation' => 'my-new-password',
+        ])->assertOk()->assertJsonPath('redirect', '/admin')->assertJsonPath('message', 'Пароль ящика изменён.');
+        $this->useBrowserSession($changed->getCookie($cookie)->getValue());
+        $this->getJson('/admin/session')->assertOk()->assertJsonPath('user.id', $owner->id);
+        $this->getJson('/api/email')->assertOk()->assertJsonPath('data.id', $box->id);
+        $this->useBrowserSession($old);
+        $this->getJson('/admin')->assertUnauthorized();
+        $this->useBrowserSession(Str::random(40));
+        $this->postJson('/admin/login', $credentials)->assertUnprocessable()->assertJsonValidationErrors('email');
+        $this->postJson('/admin/login', [...$credentials, 'password' => 'my-new-password'])->assertOk()->assertJsonPath('redirect', '/admin');
     }
 
     private function useBrowserSession(string $id): void

@@ -2,8 +2,9 @@
 
 namespace App\Console\Commands;
 
-use App\Services\MailboxSession;
+use App\Http\Middleware\ThrottleOrdinaryUser;
 use App\Services\MailboxActionLimit;
+use App\Services\MailboxSession;
 use App\Services\MailboxSocketGrant;
 use Illuminate\Cache\DatabaseStore;
 use Illuminate\Console\Command;
@@ -25,7 +26,13 @@ class PruneMailboxQuota extends Command
 
         $table = $store->getConnection()->table(config("cache.stores.$name.table"));
         $table->where('expiration', '<=', now()->timestamp)->where(function ($query) use ($store) {
-            foreach ([MailboxSession::ISSUE_LIMIT_PREFIX, MailboxActionLimit::PREFIX, MailboxSocketGrant::CACHE_PREFIX, 'mailbox-close:', 'panel-login:'] as $namespace) {
+            $namespaces = [
+                MailboxSession::ISSUE_LIMIT_PREFIX,
+                MailboxActionLimit::PREFIX,
+                MailboxSocketGrant::CACHE_PREFIX,
+                ...ThrottleOrdinaryUser::PREFIXES,
+            ];
+            foreach ($namespaces as $namespace) {
                 $prefix = $store->getPrefix().$namespace;
                 $query->orWhereRaw('substr(key, 1, ?) = ?', [mb_strlen($prefix), $prefix]);
             }

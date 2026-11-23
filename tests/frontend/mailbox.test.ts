@@ -125,10 +125,35 @@ test('browsing the domain choices only reads options and preserves the current m
     const store = useEmailStore()
     await store.refresh()
     await store.loadOptions()
+    const reopened = store.loadOptions()
+    assert.equal(store.optionsLoading, false)
+    await reopened
     assert.deepEqual(requests, ['GET /api/email', 'GET /api/messages', 'GET /api/email/options'])
     assert.deepEqual(store.domainOptions, options)
     assert.deepEqual(store.mailbox, first)
     assert.deepEqual(store.messages, [message])
+})
+
+test('a failed domain lookup can be retried and an empty catalogue is cached until it expires', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 0, 1) })
+    const available = [{ domain: 'new.test', formats: ['random'] }]
+    const fetch = t.mock.method(globalThis, 'fetch', async () => Response.json({ data: available }))
+    fetch.mock.mockImplementationOnce(async () => new Response(null, { status: 503 }))
+    fetch.mock.mockImplementationOnce(async () => Response.json({ data: [] }), 1)
+    const store = useEmailStore()
+    await store.loadOptions()
+    assert.ok(store.optionsError)
+    await store.loadOptions()
+    assert.equal(store.optionsError, '')
+    await store.loadOptions()
+    assert.equal(fetch.mock.callCount(), 2)
+    assert.deepEqual(store.domainOptions, [])
+
+    t.mock.timers.tick(60 * 60 * 1000)
+    const refresh = store.loadOptions()
+    assert.equal(store.optionsLoading, false)
+    await refresh
+    assert.deepEqual(store.domainOptions, available)
 })
 
 test('one confirmation sends the chosen domain and format as JSON with CSRF and the expected mailbox', async (t) => {
@@ -164,13 +189,15 @@ test('a disabled domain refreshes choices and keeps the old mailbox until a new 
         requests.push(init.method + ' ' + url)
         if (url === '/api/email') return address(first)
         if (url === '/api/messages') return list(first.id)
-        if (url === '/api/email/options') return Response.json({ data: [available] })
+        if (url === '/api/email/options') return Response.json({ data: requests.includes('POST /api/emails')
+            ? [available] : [{ domain: 'mail.test', formats: ['random', 'words'] }] })
         return Response.json({ errors: { domain: [rejected] } }, { status: 422 })
     })
     const store = useEmailStore()
     await store.refresh()
+    await store.loadOptions()
     const correction = await store.rotate({ domain: 'mail.test', format: 'words' })
-    assert.deepEqual(requests, ['GET /api/email', 'GET /api/messages', 'POST /api/emails', 'GET /api/email/options'])
+    assert.deepEqual(requests, ['GET /api/email', 'GET /api/messages', 'GET /api/email/options', 'POST /api/emails', 'GET /api/email/options'])
     assert.equal(correction, rejected)
     assert.deepEqual(store.domainOptions, [available])
     assert.deepEqual(store.mailbox, first)
@@ -190,6 +217,7 @@ test('a rejected rotation can return corrected choices without issuing a second 
     const store = useEmailStore()
     await store.refresh()
     assert.equal(await store.rotate({ domain: 'closed.example.test' }), 'Домен больше недоступен.')
+    await store.loadOptions()
     assert.deepEqual(store.domainOptions, [available])
     assert.deepEqual(paths, ['/api/email', '/api/messages', '/api/emails'])
 })
@@ -238,6 +266,40 @@ test('a lost rotation response reads the server mailbox without repeating the PO
     await store.rotate({ format: 'words' })
     assert.deepEqual(requests, ['GET /api/email', 'GET /api/messages', 'POST /api/emails', 'GET /api/email', 'GET /api/messages'])
     assert.deepEqual(store.mailbox, second)
+})
+
+test('a transient failure reading the mailbox after rotation can be retried with GET', async t => {
+    const requests: string[] = []
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: new EventTarget() })
+    t.after(() => { Reflect.deleteProperty(globalThis, 'window') })
+    const signals = t.mock.method(BroadcastChannel.prototype, 'postMessage', () => {})
+    let current = first
+    let failRead = false
+    t.mock.method(globalThis, 'fetch', async (path: string, init: RequestInit) => {
+        requests.push(init.method + ' ' + path)
+        if (path === '/api/emails') {
+            current = second
+            failRead = true
+            throw new TypeError('Lost response')
+        }
+        if (path === '/api/email' && failRead) {
+            failRead = false
+            return new Response(null, { status: 503 })
+        }
+        return path === '/api/email' ? address(current) : list(current.id)
+    })
+    const store = useEmailStore()
+    await store.refresh()
+    requests.length = 0
+    await store.rotate()
+    assert.equal(store.mailbox, null)
+    assert.equal(store.bootstrapFailure, 'recovering')
+    assert.equal(signals.mock.callCount(), 0)
+    await store.refresh()
+    assert.deepEqual(store.mailbox, second)
+    assert.equal(store.bootstrapFailure, null)
+    assert.equal(signals.mock.callCount(), 1)
+    assert.deepEqual(requests, ['POST /api/emails', 'GET /api/email', 'GET /api/email', 'GET /api/messages'])
 })
 
 test('a late list response cannot restore an open letter after a confirmed rotation', async (t) => {
@@ -697,4 +759,50 @@ test('a pending list cannot restore cached mail after a concurrent request repor
     await refreshing
     assert.equal(store.mailbox, null)
     assert.deepEqual(store.messages, [])
+})
+
+test('an HTTP revocation drops cached choices and discards an outstanding options response', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 0, 1) })
+    const pendingOptions = Promise.withResolvers<Response>()
+    const choices = [{ domain: 'mail.test', formats: ['random'] }]
+    let optionsReads = 0
+    t.mock.method(globalThis, 'fetch', async (path: string) => {
+        if (path === '/api/email') return address(first)
+        if (path === '/api/email/options') return ++optionsReads === 1 ? Response.json({ data: choices }) : pendingOptions.promise
+        if (path === '/api/messages/4') return new Response(null, { status: 401 })
+        return list(first.id)
+    })
+    const store = useEmailStore()
+    await store.refresh()
+    await store.loadOptions()
+    assert.deepEqual(store.domainOptions, choices)
+    t.mock.timers.tick(60 * 60 * 1000)
+    const late = store.loadOptions()
+    assert.equal(optionsReads, 2)
+    await store.openMessage(4)
+    assert.deepEqual(store.domainOptions, [])
+    assert.equal(store.optionsLoading, false)
+    assert.equal(store.bootstrapFailure, 'denied')
+    pendingOptions.resolve(Response.json({ data: choices }))
+    await late
+    assert.deepEqual(store.domainOptions, [])
+})
+
+test('a late HTTP 401 from a previous session leaves the new mailbox accessible', async t => {
+    const late = Promise.withResolvers<Response>()
+    let current = first
+    t.mock.method(globalThis, 'fetch', async (path: string) => {
+        if (path === '/api/email/options') return late.promise
+        return path === '/api/email' ? address(current) : list(current.id)
+    })
+    const store = useEmailStore()
+    await store.refresh()
+    const oldOptions = store.loadOptions()
+    store.resetSession()
+    current = second
+    await store.refresh()
+    late.resolve(new Response(null, { status: 401 }))
+    await oldOptions
+    assert.deepEqual(store.mailbox, second)
+    assert.equal(store.bootstrapFailure, null)
 })

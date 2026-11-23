@@ -7,6 +7,7 @@ use App\Http\Controllers\PanelLoginController;
 use App\Http\Controllers\PanelSettingsController;
 use App\Http\Middleware\EnsurePanelUser;
 use App\Http\Middleware\LimitRepeatedAction;
+use App\Http\Middleware\RedirectAuthenticatedPanelUser;
 use App\Http\Middleware\ThrottleOrdinaryUser;
 use Illuminate\Support\Facades\Route;
 
@@ -17,12 +18,19 @@ Route::view('/help', 'app');
 Route::prefix('api')->middleware('cache.headers:private;no_store')->group(__DIR__.'/api.php');
 Route::prefix('admin')->group(function () {
     Route::get('/session', [PanelLoginController::class, 'session']);
-    Route::get('/login', [PanelLoginController::class, 'show'])->name('login');
+    Route::get('/login', [PanelLoginController::class, 'show'])->middleware(RedirectAuthenticatedPanelUser::class)->name('login');
     Route::post('/login', [PanelLoginController::class, 'login'])
-        ->middleware([ThrottleOrdinaryUser::class.':5,1,panel-login:', LimitRepeatedAction::class.':login']);
+        ->middleware([
+            ThrottleOrdinaryUser::with(5, 1, ThrottleOrdinaryUser::PREFIXES['login']),
+            LimitRepeatedAction::class.':login',
+            RedirectAuthenticatedPanelUser::class,
+        ]);
 
     Route::middleware(['auth', EnsurePanelUser::class])->group(function () {
         Route::post('/logout', [PanelLoginController::class, 'logout'])->middleware(LimitRepeatedAction::class.':logout')->name('panel.logout');
+        Route::put('/account/password', [PanelSettingsController::class, 'mailboxPassword'])
+            ->middleware([ThrottleOrdinaryUser::with(5, 1, ThrottleOrdinaryUser::PREFIXES['password']), 'can:change-mailbox-password'])
+            ->name('panel.account.password');
         Route::get('/', [PanelController::class, 'index'])->middleware(LimitRepeatedAction::class.':panel')->name('panel.index');
         Route::get('/messages/{message}', [PanelController::class, 'show'])->whereNumber('message')->middleware(LimitRepeatedAction::class.':panel')->name('panel.message');
         Route::get('/messages/{message}/attachments/{index}', [PanelController::class, 'attachment'])

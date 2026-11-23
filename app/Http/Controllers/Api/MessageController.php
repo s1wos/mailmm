@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\MailboxPageRequest;
 use App\Http\Resources\MessageResource;
 use App\Models\Message;
 use App\Services\AttachmentDownload;
@@ -10,6 +11,7 @@ use App\Services\MailboxInbox;
 use App\Services\MailboxSession;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Pagination\Cursor;
 use Symfony\Component\HttpFoundation\Response;
 
 class MessageController extends Controller
@@ -19,9 +21,10 @@ class MessageController extends Controller
     public function index(Request $request, MailboxInbox $inbox): JsonResponse
     {
         $email = $this->mailboxes->current($request);
-        $request->validate(['cursor' => ['sometimes', 'required', 'string']]);
+        // Recover the guest session even when the requested page is invalid.
+        $cursor = Cursor::fromEncoded(app(MailboxPageRequest::class)->validated('cursor'));
 
-        return response()->json($inbox->page($email, $request->query('cursor')))
+        return response()->json($inbox->page($email, $cursor))
             ->header('X-Mailbox-Id', (string) ($email?->id ?? 0));
     }
 

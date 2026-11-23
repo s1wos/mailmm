@@ -2,9 +2,7 @@
 
 namespace App\Services;
 
-use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Crypt;
 
 class MailboxSocketRead
 {
@@ -22,25 +20,18 @@ class MailboxSocketRead
             return $response + ['code' => 'access_revoked'];
         }
         [$mailbox, $actor, $identity, $expiry] = $access;
-        $cache = Cache::store(config('cache.limiter'));
         $response += ['mailboxId' => $mailbox->id, 'serverTime' => now()->toISOString(), 'grantExpiresAt' => $expiry];
         $cursor = null;
         if ($job['command'] === 'mailbox.page') {
-            try {
-                $continuation = json_decode(Crypt::decryptString($data['continuation']), true, flags: JSON_THROW_ON_ERROR);
-            } catch (DecryptException|\JsonException) {
-                return $response + ['code' => 'invalid_request'];
-            }
-            if (($continuation['grant'] ?? null) !== $job['grant'] || $continuation['expires'] <= now()->timestamp) {
-                return $response + ['code' => 'invalid_request'];
-            }
-            if (! $cache->add(MailboxSocketGrant::CACHE_PREFIX.'page:'.hash('sha256', $data['continuation']), true, 61)) {
+            $continuation = MailboxSocketContinuation::consume($data['continuation'], $job['grant']);
+            if ($continuation === null) {
                 return $response + ['code' => 'invalid_request'];
             }
             $snapshot = $continuation['snapshot'];
             $cursor = $continuation['cursor'];
         } else {
             if (! $actor?->is_admin && ! ($job['automatic'] ?? false)) {
+                $cache = Cache::store(config('cache.limiter'));
                 $key = MailboxSocketGrant::CACHE_PREFIX.'manual:'.$identity;
                 $until = now()->getTimestampMs() + 5000;
                 $lock = $cache->lock($key.':lock', 3);
@@ -67,9 +58,7 @@ class MailboxSocketRead
             return ['requestId' => $data['requestId'], 'code' => 'access_revoked'];
         }
         $next = $page['meta']['next_cursor'];
-        $token = $next ? Crypt::encryptString(json_encode([
-            'grant' => $job['grant'], 'snapshot' => $snapshot, 'cursor' => $next, 'expires' => now()->addMinute()->timestamp,
-        ], JSON_THROW_ON_ERROR)) : null;
+        $token = $next ? MailboxSocketContinuation::issue($job['grant'], $snapshot, $next) : null;
 
         return $response + ['snapshot' => $snapshot, 'unchanged' => false, 'page' => $page, 'continuation' => $token];
     }

@@ -4,9 +4,11 @@ namespace Tests\Feature;
 
 use App\Models\Email;
 use App\Models\MailboxDomain;
+use App\Models\MailboxSettings;
 use App\Models\User;
 use App\Services\MailboxSession;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Pagination\Cursor;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
@@ -91,6 +93,38 @@ class MailboxActionsTest extends TestCase
             ->assertUnprocessable()->assertJsonValidationErrors('domain')->assertJsonPath('options.0.domain', 'other.test');
     }
 
+    public function test_a_stale_or_paused_rotation_takes_precedence_over_malformed_selection(): void
+    {
+        $issued = $this->getJson('/api/email')->assertOk();
+        $this->withCredentials()->withCookie(config('session.cookie'), $issued->getCookie(config('session.cookie'))->getValue());
+        $id = $issued->json('data.id');
+        $headers = ['X-Expected-Mailbox-Id' => $id];
+        $invalid = ['domain' => [], 'format' => 'other'];
+        MailboxSettings::query()->update(['guest_issuance_enabled' => false]);
+
+        $this->postJson('/api/emails', $invalid)->assertConflict()->assertJsonPath('code', 'mailbox_changed');
+        $this->postJson('/api/emails', $invalid, $headers)->assertServiceUnavailable()->assertJsonPath('code', 'guest_issuance_paused');
+        $this->getJson('/api/email?domain[]=invalid')->assertOk()->assertJsonPath('data.id', $id);
+
+        MailboxSettings::query()->update(['guest_issuance_enabled' => true]);
+        $key = MailboxSession::ISSUE_LIMIT_PREFIX.hash('sha256', '127.0.0.1');
+        RateLimiter::increment($key, 3600, 9);
+        $this->postJson('/api/emails', $invalid, $headers)->assertUnprocessable()->assertJsonValidationErrors(['domain', 'format'])
+            ->assertJsonPath('options.0.domain', MailboxDomain::sole()->name);
+        $this->assertSame(10, RateLimiter::attempts($key));
+        $this->assertDatabaseCount('emails', 1);
+    }
+
+    public function test_malformed_cursor_errors_identify_the_original_input_fields(): void
+    {
+        $this->getJson('/api/messages?cursor[]=bad')->assertUnprocessable()->assertJsonValidationErrors('cursor');
+        $this->getJson('/api/messages?cursor=bad')->assertUnprocessable()->assertJsonValidationErrors(['id', 'received_at', '_pointsToNextItems']);
+        $backwards = new Cursor(['id' => 1, 'received_at' => now()->toDateTimeString()], false);
+        $this->getJson('/api/messages?cursor='.$backwards->encode())->assertUnprocessable()->assertJsonValidationErrors('_pointsToNextItems');
+        $this->json('GET', '/api/messages', ['cursor' => $backwards->encode()])
+            ->assertUnprocessable()->assertJsonValidationErrors('_pointsToNextItems');
+    }
+
     public function test_direct_page_reads_have_a_ceiling_even_without_the_interface_header(): void
     {
         $this->freezeTime();
@@ -98,7 +132,10 @@ class MailboxActionsTest extends TestCase
         $owner = User::factory()->create();
         $owner->mailbox()->create(['email' => $owner->email]);
         $this->actingAs($owner)->get('/')->assertSee('name="mailmm-is-admin" content="0"', false);
-        $cursor = (new \Illuminate\Pagination\Cursor(['id' => 1, 'received_at' => now()->toDateTimeString()]))->encode();
+        $cursor = (new Cursor(['id' => 1, 'received_at' => now()->toDateTimeString()]))->encode();
+        $this->json('GET', '/api/messages', ['cursor' => $cursor], ['X-Mailmm-Action' => 'more'])->assertOk();
+        $this->getJson('/api/messages?cursor='.$cursor, ['X-Mailmm-Action' => 'more'])->assertTooManyRequests();
+        $this->travel(1)->second();
         $paths = ['/admin', '/api/messages?cursor='.$cursor];
         foreach ($paths as $path) {
             for ($attempt = 0; $attempt < 6; $attempt++) {

@@ -7,6 +7,8 @@ use App\Models\MailboxDomain;
 use App\Models\Message;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -58,18 +60,51 @@ class PanelTest extends TestCase
 
         $this->actingAs(User::factory()->create(['is_admin' => true]));
         $this->patchJson('/admin/settings/issuance', ['guest_issuance_enabled' => false])->assertOk()->assertJsonStructure(['redirect']);
-        $this->postJson($url, ['name' => ' B.TEST. ', 'issuance_enabled' => true])->assertOk()->assertJsonPath('redirect', '/admin/settings');
+        $existing = MailboxDomain::sole();
+        $existing->update(['name' => 'z.test']);
+        $added = $this->postJson($url, ['name' => ' B.TEST. ', 'issuance_enabled' => true])
+            ->assertOk()->assertJsonPath('redirect', '/admin/settings')->assertJsonStructure(['message']);
         $domain = MailboxDomain::where('name', 'b.test')->sole();
         $this->assertFalse($domain->issuance_enabled);
-        $this->getJson('/admin/settings')->assertOk()->assertJsonFragment(['name' => 'b.test', 'issuance_enabled' => false]);
+        $domains = [
+            ['id' => $domain->id, 'name' => 'b.test', 'issuance_enabled' => false],
+            ['id' => $existing->id, 'name' => 'z.test', 'issuance_enabled' => true],
+        ];
+        $added->assertJsonPath('domains', $domains);
+        $this->getJson('/admin/settings')->assertOk()->assertJsonPath('domains', $domains);
         $this->postJson($url, ['name' => 'b.test'])->assertUnprocessable()->assertJsonValidationErrors('name');
         $this->postJson($url, ['name' => 'foo..test'])->assertUnprocessable()->assertJsonValidationErrors('name');
         $this->patchJson($url.'/'.$domain->id, ['issuance_enabled' => 'oops'])->assertUnprocessable()->assertJsonValidationErrors('issuance_enabled');
         $this->getJson('/api/email/options')->assertOk()->assertJsonMissing(['domain' => 'b.test']);
-        $this->patchJson($url.'/'.$domain->id, ['issuance_enabled' => 1, 'name' => 'renamed.test'])->assertOk()->assertJsonPath('redirect', '/admin/settings');
+        $domains[0]['issuance_enabled'] = true;
+        $this->patchJson($url.'/'.$domain->id, ['issuance_enabled' => 1, 'name' => 'renamed.test'])
+            ->assertOk()->assertJsonPath('redirect', '/admin/settings')->assertJsonPath('domains', $domains)->assertJsonStructure(['message']);
         $this->getJson('/api/email/options')->assertOk()->assertJsonFragment(['domain' => 'b.test']);
-        $this->patchJson($url.'/'.$domain->id, ['issuance_enabled' => 0])->assertOk()->assertJsonPath('redirect', '/admin/settings');
+        $domains[0]['issuance_enabled'] = false;
+        $this->patchJson($url.'/'.$domain->id, ['issuance_enabled' => 0])
+            ->assertOk()->assertJsonPath('redirect', '/admin/settings')->assertJsonPath('domains', $domains);
         $this->getJson('/api/email/options')->assertOk()->assertJsonMissing(['domain' => 'b.test']);
+        $this->post($url, ['name' => 'c.test'])->assertRedirect('/admin/settings')->assertSessionHas('status');
+        $this->patch($url.'/'.$domain->id, ['issuance_enabled' => 1])->assertRedirect('/admin/settings')->assertSessionHas('status');
+    }
+
+    public function test_panel_read_validation_applies_only_to_the_requested_screen_data(): void
+    {
+        $this->actingAs(User::factory()->create(['is_admin' => true]));
+        foreach (['/admin/archive?recipient[]=invalid', '/admin?recipient[]=invalid'] as $archive) {
+            $this->get($archive)->assertOk()->assertSee('id="app"', false);
+            $this->getJson($archive)->assertUnprocessable()->assertJsonValidationErrors('recipient');
+        }
+        foreach (['/admin/mailboxes?issued=bad', '/admin?issued=bad'] as $mailboxes) {
+            $this->get($mailboxes)->assertOk()->assertSee('id="app"', false);
+            $this->getJson($mailboxes)->assertUnprocessable()->assertJsonValidationErrors('issued');
+        }
+
+        $this->getJson('/admin?recipient=ops&issued=bad')->assertOk()->assertJsonPath('screen', 'archive');
+        $this->getJson('/admin/mailboxes?recipient[]=invalid&issued=1&ticket[]=invalid')
+            ->assertOk()->assertJsonPath('credentials', null);
+        $this->actingAs(User::factory()->create())->getJson('/admin?issued=bad')
+            ->assertOk()->assertJsonPath('screen', 'archive');
     }
 
     public function test_a_stale_panel_cannot_change_settings_or_log_out_the_new_account(): void
@@ -150,14 +185,15 @@ class PanelTest extends TestCase
         $this->enableOnly('a.test');
         $intent = $this->getJson('/admin/mailboxes')->assertOk()->json('request_id');
         $this->assertTrue(Str::isUuid($intent));
-        $this->postJson('/admin/mailboxes')->assertUnprocessable()->assertJsonValidationErrors('request_id');
+        $this->postJson('/admin/mailboxes')->assertUnprocessable()->assertJsonValidationErrors('request_id')->assertJsonMissingPath('domains');
 
         $data = ['domain' => 'a.test', 'request_id' => $intent];
         $receipt = $this->issueMailbox($data)->assertOk()->json('redirect');
         $this->enableOnly('b.test');
+        MailboxDomain::where('name', 'a.test')->delete();
         $this->issueMailbox($data)->assertOk()->assertJsonPath('redirect', $receipt);
-        $this->issueMailbox(['domain' => 'b.test', 'request_id' => $intent])
-            ->assertUnprocessable()->assertJsonValidationErrors('request_id');
+        $this->issueMailbox(['domain' => 'missing.test', 'request_id' => $intent])
+            ->assertUnprocessable()->assertJsonValidationErrors('request_id')->assertJsonPath('domains.0.domain', 'b.test');
         $this->assertDatabaseCount('users', 2);
         $this->assertDatabaseCount('emails', 1);
 
@@ -183,6 +219,71 @@ class PanelTest extends TestCase
         MailboxDomain::query()->update(['issuance_enabled' => false]);
 
         return MailboxDomain::updateOrCreate(['name' => $name], ['issuance_enabled' => true]);
+    }
+
+    public function test_reset_ticket_survives_a_creation_retry_and_is_bound_to_its_session(): void
+    {
+        $this->actingAs(User::factory()->create(['is_admin' => true]));
+        $this->enableOnly('a.test');
+        $data = ['request_id' => (string) Str::uuid(), 'local_part' => 'team'];
+        $creation = $this->issueMailbox($data)->assertOk()->json('redirect');
+        $box = Email::whereEmail('team@a.test')->sole();
+        $reset = $this->postJson("/admin/mailboxes/{$box->id}/password")->assertOk()->json('redirect');
+        parse_str(parse_url($reset, PHP_URL_QUERY), $query);
+        $this->assertTrue(Str::isUuid($query['ticket']));
+        $this->issueMailbox($data)->assertOk()->assertJsonPath('redirect', $creation);
+        $this->getJson($creation)->assertOk()->assertJsonPath('credentials', null);
+        $session = $this->app['session'];
+        $token = $session->token();
+        $session->regenerateToken();
+        $this->getJson($reset)->assertOk()->assertJsonPath('credentials', null);
+        $session->put('_token', $token);
+        $password = $this->getJson($reset)->assertOk()->json('credentials.password');
+        $this->assertTrue(Hash::check($password, User::whereEmail($box->email)->sole()->password));
+        $this->getJson($reset)->assertOk()->assertJsonPath('credentials', null);
+        $this->assertDatabaseCount('emails', 1);
+    }
+
+    public function test_failure_to_store_reset_ticket_rolls_back_the_password_change(): void
+    {
+        $this->actingAs(User::factory()->create(['is_admin' => true]));
+        $owner = User::factory()->create(['password' => 'previous-password']);
+        $box = $owner->mailbox()->create(['email' => $owner->email]);
+        DB::connection()->beforeExecuting(function ($sql) {
+            if (str_starts_with($sql, 'insert into "mailbox_issuances"')) {
+                throw new \RuntimeException('Receipt unavailable');
+            }
+        });
+        $this->postJson("/admin/mailboxes/{$box->id}/password")->assertServerError();
+        $this->assertSame($owner->password, $owner->fresh()->password);
+        $this->assertSame($owner->getRememberToken(), $owner->fresh()->getRememberToken());
+    }
+
+    public function test_unexpired_session_cache_reset_ticket_issued_before_upgrade_is_consumed_once(): void
+    {
+        $admin = User::factory()->create(['is_admin' => true]);
+        $this->actingAs($admin);
+        $owner = User::factory()->create(['password' => 'legacy-password']);
+        $box = $owner->mailbox()->create(['email' => $owner->email]);
+        $ticket = Str::random(24);
+        $this->app['session']->cache()->put("issued-{$admin->id}-{$box->id}", Crypt::encrypt([
+            'email' => $owner->email, 'password' => 'legacy-password', 'ticket' => $ticket,
+        ]), now()->addMinutes(10));
+        $path = "/admin/mailboxes?issued={$box->id}&ticket=";
+        $this->getJson($path.Str::random(24))->assertJsonPath('credentials', null);
+        $this->getJson($path.$ticket)->assertJsonPath('credentials.password', 'legacy-password');
+        $this->getJson($path.$ticket)->assertJsonPath('credentials', null);
+    }
+
+    public function test_only_active_permanent_mailboxes_are_listed_and_offer_a_password_reset(): void
+    {
+        $this->actingAs(User::factory()->create(['is_admin' => true]));
+        $permanent = User::factory()->create()->mailbox()->create(['email' => 'permanent@a.test']);
+        $expires = User::factory()->create()->mailbox()->create(['email' => 'expires@a.test', 'expires_at' => now()->addDay()]);
+        $this->getJson('/admin/mailboxes')->assertOk()->assertJsonPath('mailboxes.total', 1)
+            ->assertJsonPath('mailboxes.data.0.id', $permanent->id);
+        $this->getJson('/admin')->assertOk()->assertJsonPath('metrics.permanent', 1);
+        $this->postJson("/admin/mailboxes/{$expires->id}/password")->assertNotFound();
     }
 
     public function test_only_an_administrator_can_issue_permanent_mailbox_credentials(): void

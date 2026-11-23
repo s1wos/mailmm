@@ -5,6 +5,7 @@ import { csrfHeaders } from '../csrf.ts'
 import { notifyMailboxSessionChanged, type CheckReason, type InboxSocket, SocketError } from '../mailboxSocket.ts'
 
 const requestTimeout = 15000
+const domainOptionsCacheMs = 60 * 60 * 1000
 
 class IssuancePaused extends Error {
     constructor() { super('Выдача временных адресов приостановлена.') }
@@ -95,14 +96,15 @@ export const useEmailStore = defineStore('email', () => {
     const error = ref('')
     const rotationError = ref('')
     const issuancePaused = ref(false)
-    const retryBootstrap = ref(false)
+    const bootstrapFailure = ref<'recovering' | 'unavailable' | 'denied' | null>(null)
     const domainOptions = ref<MailboxDomainOption[]>([])
     const optionsLoading = ref(false)
     const optionsError = ref('')
     let optionsRequest = 0
+    let optionsFreshUntil = 0
     let revision = 0
     let refreshRevision = 0
-    let rotationRevision: number | null = null
+    let pendingRotation: { version: number, originalId: number } | null = null
     let pending: Promise<void> | null = null
     let pendingMore: Promise<void> | null = null
     let pendingSocket: Promise<boolean> | null = null
@@ -123,9 +125,10 @@ export const useEmailStore = defineStore('email', () => {
         if (Number.isFinite(time)) clock = { time, mark: performance.now(), wallTime: Date.now() }
     }
 
-    function revoke() {
+    function revoke(cause = new SocketError('access_revoked')) {
         resetSession()
-        error.value = new SocketError('access_revoked').message
+        bootstrapFailure.value = 'denied'
+        error.value = cause.message
     }
 
     function suspendAccess() {
@@ -146,15 +149,8 @@ export const useEmailStore = defineStore('email', () => {
         const signal = options.signal ?? AbortSignal.timeout(requestTimeout)
         const response = await fetch(path, { method, headers, signal, body: options.body, credentials: 'same-origin', cache: 'no-store' })
         if (response.status === 401) {
-            const revoked = new Error('Сессия завершена. Войдите снова для доступа к своему ящику.')
-            if (version === revision && box === mailbox.value?.id) {
-                revision++
-                panelUrl.value = null
-                isAdmin.value = false
-                clear()
-                issuancePaused.value = false
-                error.value = revoked.message
-            }
+            const revoked = new SocketError('access_revoked')
+            if (version === revision && box === mailbox.value?.id) revoke(revoked)
             throw revoked
         }
         if (version === revision && (path === '/api/email' || path === '/api/emails')) {
@@ -166,24 +162,27 @@ export const useEmailStore = defineStore('email', () => {
 
     function loadOptions() {
         if (pendingOptions) return pendingOptions
+        if (Date.now() < optionsFreshUntil) return Promise.resolve()
         const read = readOptions().finally(() => { if (pendingOptions === read) pendingOptions = null })
         pendingOptions = read
         return read
     }
 
+    function cacheOptions(options: MailboxDomainOption[]) {
+        domainOptions.value = options
+        optionsFreshUntil = Date.now() + domainOptionsCacheMs
+    }
+
     async function readOptions() {
         const sequence = ++optionsRequest
-        optionsLoading.value = true
+        optionsLoading.value = optionsFreshUntil === 0
         optionsError.value = ''
         try {
             const response = await request('/api/email/options')
             const { data }: { data: MailboxDomainOption[] } = await response.json()
-            if (sequence === optionsRequest) domainOptions.value = data
+            if (sequence === optionsRequest) cacheOptions(data)
         } catch (cause) {
-            if (sequence === optionsRequest) {
-                domainOptions.value = []
-                optionsError.value = describe(cause)
-            }
+            if (sequence === optionsRequest) optionsError.value = describe(cause)
         } finally {
             if (sequence === optionsRequest) optionsLoading.value = false
         }
@@ -280,15 +279,16 @@ export const useEmailStore = defineStore('email', () => {
         revision++
         optionsRequest++
         pendingOptions = null
-        rotationRevision = null
+        pendingRotation = null
         rotating.value = false
         clear()
         panelUrl.value = null
         isAdmin.value = false
         issuancePaused.value = false
-        retryBootstrap.value = false
+        bootstrapFailure.value = null
         error.value = ''
         domainOptions.value = []
+        optionsFreshUntil = 0
         optionsError.value = ''
         optionsLoading.value = false
         refreshAgain = false
@@ -354,7 +354,7 @@ export const useEmailStore = defineStore('email', () => {
             setClock(response.headers.get('X-Server-Time') ?? response.headers.get('Date') ?? '')
             if (mailbox.value?.id !== data.id) clear()
             mailbox.value = data
-            retryBootstrap.value = false
+            bootstrapFailure.value = null
             const expires = Date.parse(response.headers.get('X-Mailbox-Grant-Expires-At') ?? '')
             if (Number.isFinite(expires)) grantExpiresAt.value = expires
             issuancePaused.value = false
@@ -422,7 +422,7 @@ export const useEmailStore = defineStore('email', () => {
                 return true
             } catch (cause) {
                 if (!current()) return false
-                if (cause instanceof SocketError && cause.code === 'access_revoked') revoke()
+                if (cause instanceof SocketError && cause.code === 'access_revoked') revoke(cause)
                 else error.value = describe(cause)
                 throw cause
             }
@@ -431,6 +431,29 @@ export const useEmailStore = defineStore('email', () => {
             checkingSocket.value = false
         })
         return pendingSocket
+    }
+
+    function finishRotation(version: number) {
+        if (pendingRotation?.version !== version) return
+        rotating.value = false
+        if (version === revision && !mailbox.value && bootstrapFailure.value === 'recovering') return
+        if (version === revision && mailbox.value && mailbox.value.id !== pendingRotation.originalId) notifyMailboxSessionChanged()
+        pendingRotation = null
+    }
+
+    async function loadCurrent(version: number) {
+        try {
+            await load(version)
+        } catch (cause) {
+            if (version !== revision) return
+            const transient = cause instanceof TypeError || cause instanceof DOMException || cause instanceof ServiceUnavailable
+            bootstrapFailure.value = transient ? 'recovering' : 'unavailable'
+            issuancePaused.value = cause instanceof IssuancePaused
+            if (issuancePaused.value || cause instanceof IssuanceQuotaExceeded || cause instanceof NoIssuableDomains
+                || cause instanceof CandidatesExhausted) clear()
+            error.value = describe(cause)
+        }
+        if (!rotating.value) finishRotation(version)
     }
 
     function refresh({ afterPending = false } = {}): Promise<void> {
@@ -445,19 +468,8 @@ export const useEmailStore = defineStore('email', () => {
             if (pendingMore) await pendingMore
             do {
                 refreshAgain = false
-                const version = revision
-                refreshRevision = version
-                try {
-                    await load(version)
-                } catch (cause) {
-                    if (version === revision) {
-                        retryBootstrap.value = cause instanceof TypeError || cause instanceof DOMException || cause instanceof ServiceUnavailable
-                        issuancePaused.value = cause instanceof IssuancePaused
-                        if (issuancePaused.value || cause instanceof IssuanceQuotaExceeded || cause instanceof NoIssuableDomains
-                            || cause instanceof CandidatesExhausted) clear()
-                        error.value = describe(cause)
-                    }
-                }
+                refreshRevision = revision
+                await loadCurrent(refreshRevision)
             } while (refreshAgain && !rotating.value)
         })().finally(() => {
             pending = null
@@ -471,7 +483,7 @@ export const useEmailStore = defineStore('email', () => {
         const originalId = mailbox.value.id
         rotating.value = true
         const version = ++revision
-        rotationRevision = version
+        pendingRotation = { version, originalId }
         closeMessage()
         rotationError.value = ''
         error.value = ''
@@ -483,40 +495,35 @@ export const useEmailStore = defineStore('email', () => {
             if (version !== revision) return
             if (mailbox.value?.id === originalId) {
                 if (cause instanceof InvalidAddressChoice || cause instanceof NoIssuableDomains) {
+                    optionsRequest++
+                    pendingOptions = null
                     if (Array.isArray(cause.options)) {
-                        optionsRequest++
-                        pendingOptions = null
-                        domainOptions.value = cause.options
+                        cacheOptions(cause.options)
                         optionsError.value = ''
                         optionsLoading.value = false
-                    } else await loadOptions()
+                    } else {
+                        domainOptions.value = []
+                        optionsFreshUntil = 0
+                        await loadOptions()
+                    }
                     return cause.message
                 }
                 if (cause instanceof CandidatesExhausted) return cause.message
             }
             clear()
-            try {
-                await load(version)
-            } catch (recoveryError) {
-                if (version !== revision) return
-                issuancePaused.value = recoveryError instanceof IssuancePaused
-                error.value = describe(recoveryError)
-            }
-            if (mailbox.value && (mailbox.value.id === originalId || cause instanceof MailboxChanged)) {
+            await loadCurrent(version)
+            if (version === revision && mailbox.value && (mailbox.value.id === originalId || cause instanceof MailboxChanged)) {
                 rotationError.value = describe(cause)
             }
         } finally {
-            if (rotationRevision === version) {
-                rotating.value = false
-                if (mailbox.value && mailbox.value.id !== originalId) notifyMailboxSessionChanged()
-            }
+            finishRotation(version)
         }
     }
 
     return {
         mailbox, panelUrl, isAdmin, grantExpiresAt, checkSocket, checkingSocket, revoke, suspendAccess, reauthorizing, socketMailboxId,
         messages, nextCursor, loadingMore, moreError, selectedId, detail, detailError,
-        checkedAt, loading, rotating, error, rotationError, issuancePaused, retryBootstrap, serverNow, setClock, refresh, rotate, expire, loadMore, openMessage, closeMessage,
+        checkedAt, loading, rotating, error, rotationError, issuancePaused, bootstrapFailure, serverNow, setClock, refresh, rotate, expire, loadMore, openMessage, closeMessage,
         domainOptions, optionsLoading, optionsError, loadOptions, resetSession,
     }
 })

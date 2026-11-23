@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { expect } from '@playwright/test'
-import { openRealtimeMailbox, test } from './stack.mjs'
+import { expectRealtimeMailbox, openRealtimeMailbox, test } from './stack.mjs'
 
 test.use({
     channel: process.env.PLAYWRIGHT_CHANNEL || undefined,
@@ -232,6 +232,31 @@ test('checking ten times reads a changed inbox by WebSocket with zero HTTP, incl
     expect(trace.http).toEqual([])
 })
 
+for (const width of [390, 1280]) {
+    test(`browser forward restores the public inbox position after visiting the about page at ${width}px`, async ({ page, stack }) => {
+        await page.setViewportSize({ width, height: 480 })
+        await page.goto(stack.url)
+        const address = await page.getByRole('button', { name: /^Скопировать адрес / }).textContent()
+        stack.seedInbox(address, 30, 'History letter')
+        await page.goto(stack.url + '/about')
+        await page.getByRole('link', { name: 'Открыть почту' }).click()
+        const row = page.locator('.letter-list button').nth(24)
+        await expect(row).toBeVisible()
+        await page.evaluate(() => document.fonts.ready)
+        await row.evaluate(button => button.scrollIntoView({ block: 'center' }))
+        const position = await page.evaluate(() => scrollY)
+        const listPosition = await page.locator('.letter-list').evaluate(list => list.scrollTop)
+        expect(position).toBeGreaterThan(100)
+        await page.goBack()
+        await expect(page.getByRole('heading', { name: 'О сервисе' })).toBeVisible()
+        await page.goForward()
+        await expect(row).toBeVisible()
+        await expect.poll(() => page.evaluate(() => scrollY)).toBe(position)
+        await expect.poll(() => page.locator('.letter-list').evaluate(list => list.scrollTop)).toBe(listPosition)
+        await expect(row).toBeInViewport()
+    })
+}
+
 test('a manual check keeps an expanded inbox and reads every required page through the socket', async ({ page, stack }) => {
     const trace = await traceMailbox(page)
     await openRealtimeMailbox(page, stack.url)
@@ -424,8 +449,11 @@ test('a permanent mailbox owner is limited and their open letter disappears afte
         workerStopped = false
         await expect.poll(() => trace.received.includes('mailbox.access-revoked'), { timeout: 15_000 }).toBe(true)
         expect(renewedTrace.received).not.toContain('mailbox.access-revoked')
+        const renewedDeliveries = renewedTrace.received.filter(event => event === 'message.received').length
         await deliver(stack.smtp, email, { subject: 'After credential renewal', text: 'Mail for the renewed session' })
-        await expect(renewed.getByRole('button', { name: /After credential renewal/ })).toBeVisible()
+        await expect.poll(() => renewedTrace.received.filter(event => event === 'message.received').length, { timeout: 15_000 })
+            .toBeGreaterThan(renewedDeliveries)
+        await expect(renewed.getByRole('button', { name: /After credential renewal/ })).toBeVisible({ timeout: 15_000 })
         await expect(body).toBeVisible()
         expect(trace.sent.filter(frame => frame.event === 'pusher:unsubscribe')).toHaveLength(oldLeaves)
         expect(trace.received.filter(event => event === 'message.received')).toHaveLength(oldDeliveries)
@@ -462,7 +490,7 @@ test('the admin exemption follows login and logout in another tab', async ({ con
     const panel = await context.newPage()
     await login(panel, stack.url, stack.admin)
     await expect(page.getByRole('link', { name: 'Вернуться в панель' })).toBeVisible()
-    await expect(page.getByText('Автообновление включено', { exact: true })).toBeVisible()
+    await expectRealtimeMailbox(page)
     const button = page.locator('.check-mail')
     for (let i = 1; i <= 2; i++) {
         await button.evaluate(el => el.click())
@@ -488,7 +516,7 @@ test('the admin exemption follows login and logout in another tab', async ({ con
     } finally {
         resume.resolve()
     }
-    await expect(page.getByText('Автообновление включено', { exact: true })).toBeVisible()
+    await expectRealtimeMailbox(page)
     await button.click()
     await expect(button).toContainText('Проверено')
     await button.evaluate(el => el.click())
@@ -561,6 +589,41 @@ test('the panel navigation stays in place while switching sections with differen
     expect(await navigation.boundingBox()).toEqual(initial)
 })
 
+test('the filtered archive keeps its place when paging and returning from a letter', async ({ page, stack }) => {
+    const recipient = 'reader@scroll.test'
+    stack.sql(`INSERT INTO messages (recipient, "from", subject, received_at)
+        SELECT :'recipient', 'sender@scroll.test', 'Письмо ' || n, statement_timestamp()
+        FROM generate_series(1, 60) AS n`, ['-v', 'recipient=' + recipient])
+    await login(page, stack.url, stack.admin)
+    await page.setViewportSize({ width: 850, height: 480 })
+    await page.goto(stack.url + '/admin/archive?recipient=' + recipient)
+    const pager = page.getByRole('navigation', { name: 'Страницы писем' })
+    const next = pager.getByRole('link', { name: 'Вперёд' })
+    const scrollY = () => page.evaluate(() => window.scrollY)
+    await expect(next).toBeVisible()
+    await page.evaluate(() => document.fonts.ready)
+    await next.evaluate(link => link.scrollIntoView({ block: 'center' }))
+    expect(await scrollY()).toBeGreaterThan(100)
+    await next.click()
+    await expect(pager).toContainText('Страница 2')
+    await expect(next).toBeInViewport()
+
+    const letter = page.locator('.mail-row').nth(19)
+    const subject = await letter.locator('strong').textContent()
+    for (const method of ['link', 'browser']) {
+        await letter.evaluate(link => link.scrollIntoView({ block: 'center' }))
+        const position = await scrollY()
+        expect(position).toBeGreaterThan(100)
+        await letter.click()
+        await expect(page.getByRole('heading', { name: subject, exact: true })).toBeVisible()
+        if (method === 'link') await page.getByRole('link', { name: 'К списку писем' }).click()
+        else await page.goBack()
+        await expect(pager).toContainText('Страница 2')
+        await expect.poll(scrollY).toBe(position)
+        await expect(letter).toBeInViewport()
+    }
+})
+
 test('the temporary mailboxes tab shows guest details and replaces a closed address', async ({ page, browser, stack }) => {
     const visitor = await browser.newContext()
     try {
@@ -600,6 +663,7 @@ test('the temporary mailboxes tab shows guest details and replaces a closed addr
 })
 
 test('an administrator can correct a stale domain and retry a lost receipt on a receive-only domain', async ({ page, stack }) => {
+    await page.setViewportSize({ width: 1280, height: 400 })
     await login(page, stack.url, stack.admin)
     const domain = page.getByLabel('Домен', { exact: true })
     const create = page.getByRole('button', { name: 'Создать ящик' })
@@ -634,9 +698,14 @@ test('an administrator can correct a stale domain and retry a lost receipt on a 
         expect(replies[1].result.redirect).toBe(receipt)
         expect(counts()).toBe('1|1')
 
+        await create.scrollIntoViewIfNeeded()
+        expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
         await create.click()
         await expect(credentials).toHaveCount(2)
         await expect(page).toHaveURL(new URL(receipt, stack.url).href)
+        await expect(create).toBeInViewport()
+        expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
+        await expect(page.locator('#create-mailbox .credentials code')).toHaveCount(2)
         const [email, password] = await credentials.allTextContents()
         expect(email.endsWith('@' + replacement)).toBe(true)
         expect(password).toHaveLength(32)
@@ -647,9 +716,115 @@ test('an administrator can correct a stale domain and retry a lost receipt on a 
         await expect(credentials.first()).not.toHaveText(email)
         await expect(credentials.first()).toContainText('@' + replacement)
         expect(counts()).toBe('2|2')
+        const secondReceipt = page.url()
+        await page.goto(stack.url + '/admin/settings')
+        await page.goBack()
+        await expect(page).toHaveURL(secondReceipt)
+        await expect(create).toBeVisible()
+        await expect(credentials).toHaveCount(0)
     } finally {
         stack.sql("DELETE FROM mailbox_domains WHERE name IN ('stale.e2e.test', :'replacement')", variables)
     }
+})
+
+test('creating on the last mailbox page keeps the mobile button and one-time credentials in view', async ({ page, stack }) => {
+    await login(page, stack.url, stack.admin)
+    const path = stack.url + '/admin/mailboxes'
+    const snapshot = await page.request.get(path, { headers: { Accept: 'application/json' } })
+    const { total } = (await snapshot.json()).mailboxes
+    const added = 13 - total % 12
+    const last = Math.ceil((total + added) / 12)
+    const prefix = 'mobile-' + randomUUID().slice(0, 8)
+    const variables = ['-v', 'prefix=' + prefix, '-v', 'added=' + added]
+    stack.sql(`WITH owners AS (
+        INSERT INTO users (name, email, password)
+        SELECT 'Mobile fixture', :'prefix' || '-' || n || '@mailmm.test', 'disabled' FROM generate_series(1, :added) n
+        RETURNING id, email
+    ) INSERT INTO emails (email, owner_user_id, created_at, updated_at) SELECT email, id, now(), now() FROM owners`, variables)
+    try {
+        await page.setViewportSize({ width: 390, height: 844 })
+        await page.goto(path + '?page=' + last)
+        await expect(page.locator('.box-list li')).toHaveCount(1)
+        await page.getByLabel('Имя до @').fill(prefix + '-created')
+        const create = page.getByRole('button', { name: 'Создать ящик' })
+        await page.evaluate(() => document.fonts.ready)
+        await create.scrollIntoViewIfNeeded()
+        const top = (await create.boundingBox()).y
+        await create.click()
+        const credentials = page.locator('#create-mailbox .credentials code')
+        await expect(credentials).toHaveCount(2)
+        await expect(page).toHaveURL(url => url.searchParams.has('ticket') && url.searchParams.get('page') === String(last))
+        await expect(page.locator('.box-list li')).toHaveCount(2)
+        await expect.poll(async () => Math.abs((await create.boundingBox()).y - top)).toBeLessThanOrEqual(2)
+        await expect(credentials.first()).toBeInViewport()
+        await expect(credentials.nth(1)).toBeInViewport()
+
+        await page.getByLabel('Имя до @').fill(prefix + '-second')
+        await create.evaluate(button => button.scrollIntoView({ block: 'end' }))
+        const beforeRepeat = (await create.boundingBox()).y
+        await create.click()
+        await expect(credentials.first()).toContainText(prefix + '-second@')
+        await expect(page.locator('.box-list li')).toHaveCount(3)
+        await expect.poll(async () => Math.abs((await create.boundingBox()).y - beforeRepeat)).toBeLessThanOrEqual(2)
+
+        const receipt = page.url()
+        await page.goto(stack.url + '/admin/settings')
+        await page.goBack()
+        await expect(page).toHaveURL(receipt)
+        await expect(create).toBeVisible()
+        await expect(page.locator('.credentials code')).toHaveCount(0)
+    } finally {
+        stack.sql(`BEGIN;
+            DELETE FROM emails WHERE email LIKE :'prefix' || '-%';
+            DELETE FROM users WHERE email LIKE :'prefix' || '-%';
+            COMMIT;`, variables)
+    }
+})
+
+test('reissuing a mailbox password keeps the expanded row and the creation draft in place', async ({ page, stack }) => {
+    await page.setViewportSize({ width: 1280, height: 350 })
+    await login(page, stack.url, stack.admin)
+    const path = stack.url + '/admin/mailboxes'
+    await page.goto(path)
+    await page.getByRole('button', { name: 'Создать ящик' }).click()
+    const credentials = page.locator('.credentials code')
+    await expect(credentials).toHaveCount(2)
+    const [email, originalPassword] = await credentials.allTextContents()
+
+    await page.goto(path)
+    const draft = page.getByLabel('Имя до @')
+    await draft.fill('next-mailbox')
+    const row = page.locator('.box-list li').filter({ hasText: email })
+    await row.locator('summary').click()
+    const reset = row.getByRole('button', { name: 'Перевыпустить пароль' })
+    await reset.evaluate(button => button.scrollIntoView({ block: 'center' }))
+    expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
+    const resume = Promise.withResolvers()
+    await page.route('**/admin/mailboxes/*/password', async route => {
+        await resume.promise
+        await route.continue()
+    }, { times: 1 })
+    try {
+        await reset.click()
+        await expect(reset).toBeDisabled()
+        await expect(page.getByText('Загрузка…', { exact: true })).toBeHidden()
+        await expect(draft).toHaveValue('next-mailbox')
+        await expect(row).toBeVisible()
+    } finally {
+        resume.resolve()
+    }
+
+    await expect(credentials.first()).toHaveText(email)
+    await expect(credentials.nth(1)).toHaveText(/\S+/)
+    expect(await credentials.nth(1).textContent()).not.toBe(originalPassword)
+    await expect(reset).toBeInViewport()
+    expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
+    await expect(row.locator('.credentials code')).toHaveCount(2)
+    await expect(draft).toHaveValue('next-mailbox')
+    await expect(page).toHaveURL(path)
+    await page.reload()
+    await expect(row).toBeVisible()
+    await expect(credentials).toHaveCount(0)
 })
 
 test('saving guest issuance keeps the settings page at the form', async ({ page, stack }) => {
@@ -678,6 +853,108 @@ test('saving guest issuance keeps the settings page at the form', async ({ page,
         await expect(toggle).toBeChecked({ checked: !enabled })
     } finally {
         stack.sql('UPDATE mailbox_settings SET guest_issuance_enabled = ' + (enabled ? 'TRUE' : 'FALSE') + ' WHERE id = 1')
+    }
+})
+
+async function openSettings(page, stack, account = stack.admin) {
+    await page.setViewportSize({ width: 1280, height: 400 })
+    await login(page, stack.url, account)
+    await page.goto(stack.url + '/admin/settings')
+}
+
+async function submitSettingsInPlace(page, button, message) {
+    await button.evaluate(element => element.scrollIntoView({ block: 'center' }))
+    expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
+    const settingsReloads = []
+    function trackSettingsRequest(request) {
+        if (request.method() === 'GET' && new URL(request.url()).pathname === '/admin/settings') {
+            settingsReloads.push(request.url())
+        }
+    }
+    page.on('request', trackSettingsRequest)
+    try {
+        await button.click()
+        await expect(page.getByRole('status').filter({ hasText: message })).toBeVisible()
+        await expect(button).toBeInViewport()
+        expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0)
+        expect(settingsReloads).toEqual([])
+    } finally {
+        page.off('request', trackSettingsRequest)
+    }
+}
+
+test('adding a mail domain keeps the settings form and neighbouring draft in place', async ({ page, stack }) => {
+    await openSettings(page, stack)
+    const card = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Почтовые домены' }) })
+    const name = card.getByLabel('Новый домен')
+    const guest = page.getByLabel('Выдавать гостевые адреса')
+    const guestDraft = !(await guest.isChecked())
+    await guest.setChecked(guestDraft)
+    await name.fill('New.Settings.Test.')
+    try {
+        await submitSettingsInPlace(page, card.getByRole('button', { name: 'Добавить домен' }), 'Домен добавлен')
+        await expect(name).toHaveValue('')
+        await expect(guest).toBeChecked({ checked: guestDraft })
+        await expect(card.getByRole('status')).toContainText('Домен добавлен')
+        await expect(card.getByRole('listitem').filter({ hasText: 'new.settings.test' })).toContainText('Только приём')
+        await page.reload()
+        await expect(card.getByText('new.settings.test', { exact: true })).toBeVisible()
+    } finally {
+        stack.sql("DELETE FROM mailbox_domains WHERE name = 'new.settings.test'")
+    }
+})
+
+test('switching a mail domain keeps the edited row and neighbouring draft in place', async ({ page, stack }) => {
+    stack.sql("INSERT INTO mailbox_domains (name, issuance_enabled) VALUES ('switch.settings.test', false)")
+    try {
+        await openSettings(page, stack)
+        const name = page.getByLabel('Новый домен')
+        await name.fill('domain-draft.test')
+        const row = page.getByRole('listitem').filter({ hasText: 'switch.settings.test' })
+        const button = row.getByRole('button')
+        for (const [action, mode] of [['Включить выдачу', 'Приём и выдача'], ['Остановить выдачу', 'Только приём']]) {
+            await expect(button).toHaveAccessibleName(action + ' на switch.settings.test')
+            await submitSettingsInPlace(page, button, 'Режим домена сохранён')
+            await expect(row).toContainText(mode)
+            await expect(name).toHaveValue('domain-draft.test')
+            await expect(row.getByRole('status')).toContainText('Режим домена сохранён')
+            const snapshot = await page.request.get(stack.url + '/admin/settings', { headers: { Accept: 'application/json' } })
+            const domain = (await snapshot.json()).domains.find(domain => domain.name === 'switch.settings.test')
+            expect(domain.issuance_enabled).toBe(action === 'Включить выдачу')
+        }
+    } finally {
+        stack.sql("DELETE FROM mailbox_domains WHERE name = 'switch.settings.test'")
+    }
+})
+
+test('changing the administrator password stays at the form and permits another authenticated save', async ({ page, stack }) => {
+    const account = { email: 'password-change@settings.test', password: stack.admin.password }
+    stack.sql(`INSERT INTO users (name, email, password, is_admin)
+        SELECT 'Password test', 'password-change@settings.test', password, true FROM users WHERE email = :'admin'`,
+        ['-v', 'admin=' + stack.admin.email])
+    try {
+        await openSettings(page, stack, account)
+        const draft = page.getByLabel('Новый домен')
+        await draft.fill('domain-draft.test')
+        const card = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Пароль администратора' }) })
+        const button = card.getByRole('button', { name: 'Изменить пароль' })
+        const current = card.getByLabel('Текущий пароль')
+        const next = card.getByLabel('Новый пароль', { exact: true })
+        const confirmation = card.getByLabel('Повторите новый пароль')
+        const changed = randomUUID()
+        for (const [from, to] of [[account.password, changed], [changed, account.password]]) {
+            await current.fill(from)
+            await next.fill(to)
+            await confirmation.fill(to)
+            await submitSettingsInPlace(page, button, 'Пароль администратора изменён')
+            await expect(current).toHaveValue('')
+            await expect(next).toHaveValue('')
+            await expect(confirmation).toHaveValue('')
+            await expect(draft).toHaveValue('domain-draft.test')
+            await expect(card.getByRole('status')).toContainText('Пароль администратора изменён')
+        }
+    } finally {
+        stack.sql("DELETE FROM users WHERE email = 'password-change@settings.test'")
     }
 })
 
@@ -758,6 +1035,87 @@ test('the mailbox address alone is selected when copying requires the browser me
     await address.click()
     await expect(page.getByText('Адрес выделен. Скопируйте его через меню браузера.', { exact: true })).toBeVisible()
     expect(await page.evaluate(() => window.getSelection().toString())).toBe(email)
+})
+
+test('reopening the address dialog reuses the loaded domain choices', async ({ page, stack }) => {
+    await page.clock.install()
+    let requests = 0
+    await page.route('**/api/email/options', route => {
+        requests++
+        return route.continue()
+    })
+    await page.goto(stack.url)
+    const open = page.getByRole('button', { name: 'Сменить адрес', exact: true })
+    const dialog = page.getByRole('dialog')
+    const confirm = dialog.getByRole('button', { name: 'Сменить адрес', exact: true })
+    await open.click()
+    await expect(confirm).toBeEnabled()
+    await dialog.getByRole('button', { name: 'Отмена' }).click()
+    await page.clock.fastForward(2000)
+
+    await open.click()
+    expect(await dialog.getByText('Загружаем домены…').isVisible()).toBe(false)
+    expect(await confirm.isEnabled()).toBe(true)
+    expect(requests).toBe(1)
+})
+
+for (const width of [280, 1280]) {
+    test(`the address change button stays in place at ${width}px while loading domains and changing the address`, async ({ page, stack }) => {
+        await page.setViewportSize({ width, height: 800 })
+        const options = Promise.withResolvers()
+        const rotation = Promise.withResolvers()
+        await page.route('**/api/email/options', async route => { await options.promise; await route.continue() })
+        await page.route('**/api/emails', async route => { await rotation.promise; await route.continue() })
+        await page.goto(stack.url)
+        await page.getByRole('button', { name: 'Сменить адрес', exact: true }).click()
+
+        const dialog = page.getByRole('dialog')
+        const confirm = dialog.getByRole('button', { name: 'Сменить адрес', exact: true })
+        const pending = dialog.getByRole('button', { name: 'Меняем адрес…', exact: true })
+        const finishAnimations = async element => {
+            await Promise.all(element.getAnimations().map(animation => animation.finished))
+        }
+        try {
+            await expect(dialog.getByText('Загружаем домены…')).toBeVisible()
+            await page.evaluate(() => document.fonts.ready)
+            await dialog.evaluate(finishAnimations)
+            const initial = await confirm.boundingBox()
+            options.resolve()
+            await expect(confirm).toBeEnabled()
+            const ready = await confirm.boundingBox()
+            expect.soft(ready).toEqual(initial)
+
+            await confirm.hover()
+            await page.mouse.down()
+            await confirm.evaluate(finishAnimations)
+            expect.soft(await confirm.boundingBox()).toEqual(ready)
+            await page.mouse.up()
+            await expect(pending).toBeDisabled()
+            await pending.evaluate(finishAnimations)
+            expect.soft(await pending.boundingBox()).toEqual(ready)
+        } finally {
+            options.resolve()
+            rotation.resolve()
+        }
+        await expect(dialog).toBeHidden()
+    })
+}
+
+test('a guest recovers after a failed rotation and mailbox read without repeating the POST', async ({ page, stack }) => {
+    await openRealtimeMailbox(page, stack.url)
+    const address = page.locator('.address-value')
+    const original = await address.textContent()
+    let posts = 0
+    let reads = 0
+    await page.route('**/api/emails', route => { posts++; return route.abort() })
+    await page.route('**/api/email', route => ++reads === 1 ? route.abort() : route.continue())
+
+    await page.getByRole('button', { name: 'Сменить адрес', exact: true }).click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Сменить адрес' }).click()
+    await expect.poll(() => reads).toBe(2)
+    await expect(address).toHaveText(original)
+    await expect(page.getByText('Автообновление включено')).toBeVisible()
+    expect(posts).toBe(1)
 })
 
 test('a quota warning disappears automatically and can be closed on the next attempt', async ({ page, stack }) => {
@@ -1022,4 +1380,31 @@ test('concurrent confirmations from the same guest charge one rotation', async (
     const current = await page.evaluate(async () => (await fetch('/api/email')).json())
     expect(current.data.id).toBe(result.find(r => r.status === 201).body.data.id)
     expect(issued()).toBe(before + 1)
+})
+
+test('a permanent mailbox owner can choose a password and sign in again', async ({ page, stack }) => {
+    await login(page, stack.url, stack.admin)
+    await page.goto(stack.url + '/admin/mailboxes')
+    await page.getByRole('button', { name: 'Создать ящик' }).click()
+    const issued = page.locator('.credentials code')
+    await expect(issued).toHaveCount(2)
+    const [email, password] = await issued.allTextContents()
+    await page.getByRole('button', { name: 'Выйти' }).first().click()
+    await expect(page.getByLabel('Электронная почта')).toBeVisible()
+
+    await login(page, stack.url, { email, password })
+    const change = page.getByText('Сменить пароль', { exact: true })
+    await expect(change).toBeVisible()
+    await change.click()
+    const chosen = randomUUID()
+    await page.getByLabel('Текущий пароль').fill(password)
+    await page.getByLabel('Новый пароль', { exact: true }).fill(chosen)
+    await page.getByLabel('Повторите новый пароль').fill(chosen)
+    await page.getByRole('button', { name: 'Изменить пароль' }).click()
+    await expect(page.getByRole('status')).toContainText('Пароль ящика изменён.')
+
+    await page.getByRole('button', { name: 'Выйти' }).first().click()
+    await expect(page.getByLabel('Электронная почта')).toBeVisible()
+    await login(page, stack.url, { email, password: chosen })
+    await expect(page.getByRole('heading', { name: 'Моя почта' })).toBeVisible()
 })

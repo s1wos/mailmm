@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ArrowLeft, CircleHelp, Inbox, Info, Menu, X } from '@lucide/vue'
 import { useEmailStore } from '../stores/emailStore'
 import { useActionGuard, useNavigationGuard } from '../useActionGuard'
+import { finishScrollRestoration } from '../router/scroll'
 
 const route = useRoute()
 const store = useEmailStore()
@@ -12,6 +13,12 @@ const actions = useActionGuard(() => store.isAdmin)
 const menuOpen = ref(false)
 const menuButton = ref<HTMLButtonElement | null>(null)
 const main = ref<HTMLElement | null>(null)
+const renderedPath = ref('')
+
+onMounted(() => { renderedPath.value = route.path })
+watch([() => route.fullPath, renderedPath, () => store.loading], ([fullPath, rendered, loading]) => {
+    if (rendered === route.path && (rendered !== '/' || !loading)) finishScrollRestoration(fullPath)
+}, { flush: 'post' })
 
 watch(() => route.path, async () => {
     menuOpen.value = false
@@ -50,9 +57,9 @@ function toggleMenu() {
             </nav>
         </header>
         <main id="main" ref="main" class="workspace-main" tabindex="-1">
-            <RouterView v-slot="{ Component }">
-                <Transition name="page" mode="out-in">
-                    <component :is="Component" :key="route.path" />
+            <RouterView v-slot="{ Component, route: viewRoute }">
+                <Transition name="page" mode="out-in" @before-leave="renderedPath = ''" @after-enter="renderedPath = viewRoute.path">
+                    <component :is="Component" :key="viewRoute.path" />
                 </Transition>
             </RouterView>
         </main>

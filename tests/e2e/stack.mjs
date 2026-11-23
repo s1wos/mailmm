@@ -60,7 +60,7 @@ export const test = base.extend({
                 closeMailbox: email => sql("UPDATE emails SET closed_at = now() WHERE email = :'recipient'", ['-v', 'recipient=' + email]),
                 resetTestData: () => sql(`BEGIN;
                     DELETE FROM messages;
-                    DELETE FROM cache WHERE key LIKE '%guest-mailbox-issue:%';
+                    DELETE FROM cache WHERE key LIKE '%guest-mailbox-issue:%' OR key LIKE '%panel-login:%';
                     COMMIT;`),
                 stopRealtime: () => compose(['stop', '-t', '3', 'reverb']),
                 startRealtime: () => compose(['start', 'reverb']),
@@ -121,5 +121,9 @@ test.beforeEach(async ({ stack }) => { stack.resetTestData() })
 
 export async function openRealtimeMailbox(page, url) {
     await page.goto(url)
+    await expectRealtimeMailbox(page)
+}
+
+export async function expectRealtimeMailbox(page) {
     await expect(page.getByText('Автообновление включено', { exact: true })).toBeVisible({ timeout: 15_000 })
 }

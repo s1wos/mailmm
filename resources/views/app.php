@@ -18,6 +18,8 @@ $vite = app(Vite::class);
     <meta name="robots" content="<?= $panel ? 'noindex' : 'index,follow' ?>">
     <meta name="theme-color" content="<?= $panel ? '#e9ebfa' : '#e5e6f5' ?>">
     <title><?= $panel ? 'Панель' : 'Временная почта' ?> · mailmm</title>
+    <link rel="icon" href="<?= e(asset('favicon.ico')) ?>" sizes="16x16 32x32 48x48">
+    <link rel="icon" type="image/svg+xml" href="<?= e($vite->asset('resources/images/mailmm.svg')) ?>" sizes="any">
     <?= $vite(['resources/css/mailmm-theme.css', 'resources/js/app.ts']) ?>
     <link rel="stylesheet" id="public-css" href="<?= e($vite->asset('resources/css/app.css')) ?>" media="<?= $panel ? 'not all' : 'all' ?>">
     <link rel="stylesheet" id="panel-css" href="<?= e(asset('panel.css')) ?>" media="<?= $panel ? 'all' : 'not all' ?>">

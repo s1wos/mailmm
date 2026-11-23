@@ -1,12 +1,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import vue from '@vitejs/plugin-vue'
-import { createServer } from 'vite'
 import { createSSRApp, effectScope } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { usePanelForm } from '../../resources/js/panel/usePanelForm.ts'
 import { panelRequest, setPanelUser } from '../../resources/js/panel/http.ts'
+import { loadComponent } from './vueFixture.ts'
 
 test('a mutation identifies the account that opened its form and checks the session on conflict', async t => {
     const events = new EventTarget()
@@ -102,43 +101,34 @@ test('a domain change reports its own error and an unmounted form ignores a late
 })
 
 test('the mailbox screen shows issued credentials only in the supplied page and applies the selected domain limits', async () => {
-    const vite = await createServer({
-        configFile: false,
-        plugins: [vue()],
-        server: { middlewareMode: true, ws: false, watch: null },
+    const Mailboxes = await loadComponent('/resources/js/panel/Mailboxes.vue')
+    const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [{ path: '/:path(.*)', component: Mailboxes }],
     })
-    try {
-        const Mailboxes = (await vite.ssrLoadModule('/resources/js/panel/Mailboxes.vue')).default
-        const router = createRouter({
-            history: createMemoryHistory(),
-            routes: [{ path: '/:path(.*)', component: Mailboxes }],
-        })
-        await router.push('/admin?issued=12&ticket=one-use')
-        const credentials = { email: 'owner@example.test', password: 'one-use-fixture' }
-        const page = {
-            screen: 'mailboxes',
-            request_id: '9a42feeb-18c8-4251-afc6-02f411f2970a',
-            user: { id: 1, is_admin: true, email: 'admin@example.test' },
-            domains: [
-                { domain: 'short.test', limit: 4, formats: ['random'] },
-                { domain: 'words.test', limit: 64, formats: ['random', 'words'] },
-            ],
-            mailboxes: { data: [], current_page: 1, last_page: 2, total: 13, prev_page_url: null, next_page_url: '/admin/mailboxes?page=2' },
-        }
-        const issued = await renderToString(createSSRApp(Mailboxes, { page: { ...page, credentials } }).use(router))
-        assert.match(issued, /Пароль показывается один раз/)
-        assert.ok(issued.includes(credentials.password))
-        assert.ok(issued.includes('name="request_id" value="' + page.request_id + '"'))
-        assert.match(issued, /href="\/admin\/mailboxes\?page=2"/)
-        assert.match(issued, /name="local_part"[^>]*maxlength="4"/)
-        assert.match(issued, /<option value="words" disabled/)
-        const revisited = await renderToString(createSSRApp(Mailboxes, {
-            page: { ...page, credentials: null, domains: [] },
-        }).use(router))
-        assert.ok(!revisited.includes(credentials.password))
-        assert.match(revisited, /Добавьте почтовый домен/)
-        assert.doesNotMatch(revisited, /name="domain"/)
-    } finally {
-        await vite.close()
+    await router.push('/admin?issued=12&ticket=one-use')
+    const credentials = { email: 'owner@example.test', password: 'one-use-fixture' }
+    const page = {
+        screen: 'mailboxes',
+        request_id: '9a42feeb-18c8-4251-afc6-02f411f2970a',
+        user: { id: 1, is_admin: true, email: 'admin@example.test' },
+        domains: [
+            { domain: 'short.test', limit: 4, formats: ['random'] },
+            { domain: 'words.test', limit: 64, formats: ['random', 'words'] },
+        ],
+        mailboxes: { data: [], current_page: 1, last_page: 2, total: 13, prev_page_url: null, next_page_url: '/admin/mailboxes?page=2' },
     }
+    const issued = await renderToString(createSSRApp(Mailboxes, { page: { ...page, credentials } }).use(router))
+    assert.match(issued, /Пароль показывается один раз/)
+    assert.ok(issued.includes(credentials.password))
+    assert.ok(issued.includes('name="request_id" value="' + page.request_id + '"'))
+    assert.match(issued, /href="\/admin\/mailboxes\?page=2"/)
+    assert.match(issued, /name="local_part"[^>]*maxlength="4"/)
+    assert.match(issued, /<option value="words" disabled/)
+    const revisited = await renderToString(createSSRApp(Mailboxes, {
+        page: { ...page, credentials: null, domains: [] },
+    }).use(router))
+    assert.ok(!revisited.includes(credentials.password))
+    assert.match(revisited, /Добавьте почтовый домен/)
+    assert.doesNotMatch(revisited, /name="domain"/)
 })

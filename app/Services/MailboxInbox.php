@@ -6,7 +6,6 @@ use App\Models\Email;
 use App\Models\Message;
 use Illuminate\Pagination\Cursor;
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\Validator;
 
 class MailboxInbox
 {
@@ -18,17 +17,8 @@ class MailboxInbox
         return $inbox->total.'/'.$inbox->oldest;
     }
 
-    public function page(?Email $mailbox, ?string $encodedCursor = null, bool $socketPreview = false): array
+    public function page(?Email $mailbox, ?Cursor $cursor = null, bool $socketPreview = false): array
     {
-        $cursor = null;
-        if ($encodedCursor !== null) {
-            $cursor = Cursor::fromEncoded($encodedCursor);
-            Validator::validate($cursor?->toArray() ?? [], [
-                'id' => ['required', 'integer', 'min:1'],
-                'received_at' => ['required', 'date', 'regex:/\A\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d{1,6})?\z/'],
-                '_pointsToNextItems' => ['accepted'],
-            ]);
-        }
         $query = $mailbox?->messages()->retained()->latest('received_at')->latest('id')->toBase()
             ->select(['id', 'received_at'])
             ->selectRaw('COALESCE(json_array_length(attachments), 0) > 0 AS has_attachments');

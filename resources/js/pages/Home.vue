@@ -1,5 +1,9 @@
+<script lang="ts">
+const inboxPositions = new Map<number, { mailboxId: number, top: number }>()
+</script>
+
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watchPostEffect } from 'vue'
 import { Check, ChevronDown, Inbox, Mail, MailOpen, Paperclip, RefreshCw } from '@lucide/vue'
 import { useMailboxSync } from '../useMailboxSync'
 import { useEmailStore } from '../stores/emailStore'
@@ -10,7 +14,28 @@ import MailboxWarning from '../components/MailboxWarning.vue'
 const store = useEmailStore()
 const { now, online, guard, manualCheck, manualDisabled, refreshWarning, statusText, checkMail } = useMailboxSync(store)
 const inboxTitle = ref<HTMLElement | null>(null)
+const letterList = ref<HTMLUListElement | null>(null)
 const selected = computed(() => store.messages.find(m => m.id === store.selectedId))
+
+// Vue Router restores the document. Wide screens also scroll the inbox list itself.
+function rememberListScroll() {
+    if (!store.mailbox || !letterList.value || location.pathname !== '/') return
+    const entry = history.state
+    if (typeof entry?.position !== 'number') return
+    if (!entry.inboxScrolled) history.replaceState({ ...entry, inboxScrolled: true }, '')
+    inboxPositions.set(entry.position, { mailboxId: store.mailbox.id, top: letterList.value.scrollTop })
+}
+
+onMounted(() => {
+    const entry = history.state
+    const saved = entry?.inboxScrolled && inboxPositions.get(entry.position)
+    if (!saved) return
+    const stop = watchPostEffect(() => {
+        if (store.loading) return
+        if (letterList.value && store.mailbox?.id === saved.mailboxId) letterList.value.scrollTop = saved.top
+        stop()
+    })
+})
 const shortDate = new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'short' })
 const time = new Intl.DateTimeFormat('ru', { hour: '2-digit', minute: '2-digit' })
 const today = new Intl.DateTimeFormat('ru', { weekday: 'long', day: 'numeric', month: 'long' })
@@ -77,7 +102,7 @@ async function loadMore() {
                 </div>
                 <div v-else class="mail-panes">
                     <div class="list-pane">
-                        <ul class="letter-list">
+                        <ul ref="letterList" class="letter-list" @scroll.passive="rememberListScroll">
                             <li v-for="message in store.messages" :key="message.id">
                                 <button :id="'letter-' + message.id" type="button" :class="{ chosen: selected?.id === message.id }"
                                     :aria-disabled="guard.blocked('open:' + message.id) || undefined"

@@ -4,6 +4,10 @@ namespace App\Http\Controllers;
 
 use App\Events\MailboxAccessRevoked;
 use App\Exceptions\NoIssuableDomains;
+use App\Http\Requests\CreatePermanentMailboxRequest;
+use App\Http\Requests\PanelArchiveRequest;
+use App\Http\Requests\PanelMailboxesRequest;
+use App\Http\Requests\PanelMessageRequest;
 use App\Http\Responses\PanelResponse;
 use App\Models\Email;
 use App\Models\Message;
@@ -22,9 +26,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
-use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpFoundation\Response;
@@ -38,12 +40,11 @@ class PanelController extends Controller
 
     public function index(Request $request, MailDashboard $dashboard): View|JsonResponse
     {
-        $user = $request->user();
-        if (! $user->is_admin || $request->has('recipient')) {
-            return $this->archive($request);
+        if (! $request->user()->is_admin || $request->has('recipient')) {
+            return $this->archive(app(PanelArchiveRequest::class));
         }
         if ($request->has('issued')) {
-            return $this->mailboxes($request);
+            return $this->mailboxes(app(PanelMailboxesRequest::class));
         }
 
         return PanelResponse::screen($request, 'dashboard', fn () => $dashboard->overview());
@@ -54,15 +55,15 @@ class PanelController extends Controller
         return response()->json(['activeUsers' => SitePresence::activeUsers()]);
     }
 
-    public function archive(Request $request): View|JsonResponse
+    public function archive(PanelArchiveRequest $request): View|JsonResponse
     {
         return PanelResponse::screen($request, 'archive', fn () => $this->inboxData($request));
     }
 
-    private function inboxData(Request $request): array
+    private function inboxData(PanelArchiveRequest $request): array
     {
         $user = $request->user();
-        $recipient = $request->validate(['recipient' => ['nullable', 'string', 'max:254']])['recipient'] ?? '';
+        $recipient = $request->validated('recipient') ?? '';
         $query = $this->messages($user);
         $listQuery = [];
         if ($user->is_admin && $recipient !== '') {
@@ -89,7 +90,7 @@ class PanelController extends Controller
         ];
     }
 
-    public function mailboxes(Request $request): View|JsonResponse
+    public function mailboxes(PanelMailboxesRequest $request): View|JsonResponse
     {
         return PanelResponse::screen($request, 'mailboxes', fn () => $this->mailboxesData($request));
     }
@@ -112,10 +113,11 @@ class PanelController extends Controller
         });
     }
 
-    private function mailboxesData(Request $request): array
+    private function mailboxesData(PanelMailboxesRequest $request): array
     {
-        $issued = $request->validate(['issued' => ['nullable', 'integer', 'min:1']])['issued'] ?? null;
-        $mailboxes = Email::whereNotNull('owner_user_id')->active()->latest('id')
+        $issued = $request->validated('issued');
+        $ticket = $request->validated('ticket');
+        $mailboxes = Email::activePermanent()->latest('id')
             ->paginate(12, ['id', 'email', 'created_at'])
             ->withPath(route('panel.mailboxes', absolute: false));
 
@@ -123,7 +125,8 @@ class PanelController extends Controller
             'mailboxes' => $this->page($mailboxes),
             'domains' => $this->domainOptions(),
             'request_id' => (string) Str::uuid(),
-            'credentials' => $issued && ! $request->isMethod('HEAD') ? $this->readCredentials($request, (int) $issued) : null,
+            'credentials' => $issued && $ticket !== null && ! $request->isMethod('HEAD')
+                ? MailboxIssuance::read($request, (int) $issued, $ticket) : null,
         ];
     }
 
@@ -146,20 +149,9 @@ class PanelController extends Controller
         ];
     }
 
-    public function createMailbox(Request $request): JsonResponse|RedirectResponse
+    public function createMailbox(CreatePermanentMailboxRequest $request): JsonResponse|RedirectResponse
     {
-        $data = $request->validate([
-            'request_id' => ['required', 'string', 'uuid'],
-            'domain' => ['sometimes', 'required', 'string', 'max:252'],
-            'format' => ['sometimes', 'required', 'string', 'in:random,words'],
-            'local_part' => ['nullable', 'string', 'max:64', 'regex:/\A[a-z0-9]+(?:[._-][a-z0-9]+)*\z/'],
-        ], [
-            'request_id.*' => 'Обновите страницу, чтобы начать новую выдачу.',
-            'local_part.max' => 'Максимальная длина имени — 64 символа.',
-            'local_part.regex' => 'Используйте строчные латинские буквы и цифры. Внутри имени допустимы точка, дефис и подчёркивание.',
-            'domain.*' => 'Выберите доступный почтовый домен.',
-            'format.*' => 'Выберите один из доступных форматов имени.',
-        ]);
+        $data = $request->validated();
         $ticket = strtolower($data['request_id']);
         try {
             $id = DB::transaction(fn () => MailboxIssuance::issue(
@@ -206,61 +198,31 @@ class PanelController extends Controller
 
     public function resetMailboxPassword(Request $request, int $mailbox): JsonResponse|RedirectResponse
     {
-        $email = Email::query()->active()->whereNotNull('owner_user_id')->whereNull('expires_at')->findOrFail($mailbox);
+        $email = Email::activePermanent()->findOrFail($mailbox);
         $password = Str::random(32);
-        DB::transaction(function () use ($email, $password) {
+        $direct = $request->wantsJson() && $request->boolean('return_credentials');
+        $ticket = DB::transaction(function () use ($request, $email, $password, $direct) {
             $owner = User::where('is_admin', false)->lockForUpdate()->findOrFail($email->owner_user_id);
             $owner->password = $password;
             $owner->setRememberToken(Str::random(60));
             $owner->save();
+            $ticket = $direct ? null : MailboxIssuance::storeReset($request, $email->id, $password);
             if (config('session.driver') === 'database') {
                 DB::connection(config('session.connection'))->table(config('session.table'))->where('user_id', $owner->id)->delete();
             }
             MailboxNotifications::publish(new MailboxAccessRevoked($email->id));
+
+            return $ticket;
         });
 
-        return $this->issued($request, $email, $password);
+        if ($direct) {
+            return response()->json(['credentials' => ['email' => $email->email, 'password' => $password]]);
+        }
+
+        return PanelResponse::redirect($request, route('panel.mailboxes', ['issued' => $email->id, 'ticket' => $ticket], false));
     }
 
-    private function issued(Request $request, Email $mailbox, string $password): JsonResponse|RedirectResponse
-    {
-        $ticket = Str::random(24);
-        $request->session()->cache()->put(
-            'issued-'.$request->user()->id.'-'.$mailbox->id,
-            Crypt::encrypt(['email' => $mailbox->email, 'password' => $password, 'ticket' => $ticket]),
-            now()->addMinutes(10),
-        );
-
-        return PanelResponse::redirect($request, route('panel.mailboxes', ['issued' => $mailbox->id, 'ticket' => $ticket], false));
-    }
-
-    private function readCredentials(Request $request, int $mailbox): ?array
-    {
-        $ticket = $request->query('ticket');
-        if (is_string($ticket) && Str::isUuid($ticket)) {
-            return MailboxIssuance::read($request, $mailbox, $ticket);
-        }
-
-        $cache = $request->session()->cache();
-        $key = 'issued-'.$request->user()->id.'-'.$mailbox;
-        $encrypted = $cache->get($key);
-        if (! $encrypted) {
-            return null;
-        }
-        $receipt = Crypt::decrypt($encrypted);
-        if (($receipt['ticket'] ?? null) !== $request->query('ticket')) {
-            return null;
-        }
-        $cache->forget($key);
-        $hash = User::whereEmail($receipt['email'])->value('password');
-        if (! $hash || ! Hash::check($receipt['password'], $hash)) {
-            return null;
-        }
-
-        return ['email' => $receipt['email'], 'password' => $receipt['password']];
-    }
-
-    public function show(Request $request, int $message): View|JsonResponse
+    public function show(PanelMessageRequest $request, int $message): View|JsonResponse
     {
         $user = $request->user();
         $letter = $this->messages($user)->findOrFail($message, $request->wantsJson() ? ['*'] : ['id']);
@@ -268,14 +230,14 @@ class PanelController extends Controller
         return PanelResponse::screen($request, 'message', fn () => $this->messageData($request, $letter));
     }
 
-    private function messageData(Request $request, Message $letter): array
+    private function messageData(PanelMessageRequest $request, Message $letter): array
     {
-        $user = $request->user();
-        $overview = $user->is_admin && $request->query('from') === 'overview';
-        $activeSection = $user->is_admin && ! $overview ? 'panel.archive' : 'panel.index';
+        $admin = $request->user()->is_admin;
+        $overview = $admin && $request->query('from') === 'overview';
+        $activeSection = $admin && ! $overview ? 'panel.archive' : 'panel.index';
         $parameters = [];
-        $recipient = $request->query('recipient');
-        if ($user->is_admin && ! $overview && is_string($recipient) && $recipient !== '' && strlen($recipient) <= 254) {
+        $recipient = $request->validated('recipient');
+        if ($admin && ! $overview && $recipient !== null && $recipient !== '') {
             $parameters['recipient'] = $recipient;
         }
         if (! $overview && $request->integer('page') > 1) {

@@ -134,4 +134,34 @@ class MailSchemaRollbackTest extends TestCase
         self::assertFalse(Schema::hasTable('mailbox_issuances'));
         $this->assertDatabaseHas('messages', ['recipient' => 'archive@example.test']);
     }
+
+    public function test_receipt_upgrade_and_rollback_preserve_creation_keys_and_live_passwords(): void
+    {
+        $path = ['--path' => ['database/migrations/2026_11_23_000001_allow_password_reset_receipts.php']];
+        $this->artisan('migrate:rollback', $path)->assertSuccessful();
+        $id = DB::table('emails')->insertGetId(['email' => 'upgrade@example.test']);
+        $creation = [
+            'request_key' => str_repeat('c', 64), 'parameters_hash' => str_repeat('p', 64),
+            'email_id' => $id, 'session_hash' => str_repeat('s', 64),
+            'encrypted_password' => 'old-secret', 'expires_at' => now()->addMinutes(10)->toDateTimeString(),
+        ];
+        DB::table('mailbox_issuances')->insert($creation);
+        $this->artisan('migrate', $path)->assertSuccessful();
+        $this->assertDatabaseHas('mailbox_issuances', $creation);
+
+        $reset = [...$creation, 'request_key' => str_repeat('r', 64), 'parameters_hash' => null, 'encrypted_password' => 'new-secret'];
+        DB::table('mailbox_issuances')->insert($reset);
+        try {
+            Artisan::call('migrate:rollback', $path);
+            self::fail('A live password reset receipt must survive a rollback attempt.');
+        } catch (RuntimeException $error) {
+            self::assertStringContainsString('outstanding password reset receipts', $error->getMessage());
+        }
+        $this->assertDatabaseHas('mailbox_issuances', $reset);
+        $this->travel(11)->minutes();
+        $this->artisan('migrate:rollback', $path)->assertSuccessful();
+        $this->assertDatabaseMissing('mailbox_issuances', ['request_key' => $reset['request_key']]);
+        $this->assertDatabaseHas('mailbox_issuances', $creation);
+        self::assertTrue(Schema::hasIndex('mailbox_issuances', ['email_id'], 'unique'));
+    }
 }

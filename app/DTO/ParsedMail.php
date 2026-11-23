@@ -9,7 +9,6 @@ readonly class ParsedMail
         public string $from,
         public ?string $subject,
         public ?string $bodyText,
-        public ?string $bodyHtml,
         public array $attachments,
     ) {}
 }

@@ -162,6 +162,8 @@ input:hover { border-color: #a8a5c9; }
 .input-icon > .icon { position: absolute; top: 50%; left: .75rem; transform: translateY(-50%); color: var(--muted); }
 .input-icon > input:not([type=hidden]):not([type=checkbox]) { padding-left: 2.35rem; }
 .search-form { margin-bottom: 1rem; }
+.owner-password { margin-bottom: 1rem; }
+.owner-password .stack-form { max-width: 28rem; margin-top: .65rem; }
 .search-row, .pager, .key-options summary, .login-domain { display: flex; gap: .55rem; align-items: center; }
 .hint, .key-options p { margin-top: .45rem; color: var(--muted); font-size: .76rem; }
 .error { color: #a52f34; font-size: .81rem; margin-top: .4rem; }
@@ -257,8 +259,10 @@ input:hover { border-color: #a8a5c9; }
     .page { padding: 1.2rem; }
 }
 @media (max-width: 640px) {
-    .workspace { width: calc(100% - 1rem); margin: .5rem auto; min-height: calc(100svh - 1rem); border-radius: 1.2rem; }
-    .mobile-bar { padding: .65rem 1rem; border-radius: 1.15rem 1.15rem 0 0; }
+    :root { background: var(--paper); scrollbar-gutter: auto; }
+    .workspace, .login-layout { width: 100%; min-height: 100svh; border: 0; border-radius: 0; box-shadow: none; background: var(--paper); }
+    .workspace { margin: 0; }
+    .mobile-bar { padding: .65rem 1rem; border-radius: 0; }
     .wordmark { font-size: 1.5rem; }
     .page { padding: 1.1rem .8rem; }
     .page-heading { margin-bottom: 1rem; align-items: center; }
@@ -282,8 +286,9 @@ input:hover { border-color: #a8a5c9; }
     .card-heading { margin-bottom: .8rem; }
     .settings-grid, .management-grid { gap: .75rem; }
     .stack-form .button { min-height: 2.65rem; }
-    .login-layout { grid-template-columns: 1fr; min-height: auto; max-width: 27rem; }
-    .login-intro { min-height: 4.55rem; flex-direction: row; align-items: center; padding: 1rem; }
+    .login-wrap { padding: 0; }
+    .login-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; padding: 0; }
+    .login-intro { min-height: 4.55rem; flex-direction: row; align-items: center; padding: 1rem; background: var(--paper); border-radius: 0; border-bottom: 1px solid var(--line); }
     .login-art { display: none; }
     .login-form-wrap { padding: 1.65rem 1rem 1rem; }
     .login-form-block { padding-block: 1.25rem; }

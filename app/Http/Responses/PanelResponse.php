@@ -28,10 +28,13 @@ class PanelResponse
         ]);
     }
 
-    public static function redirect(Request $request, string $path, ?string $message = null): JsonResponse|RedirectResponse
+    public static function redirect(Request $request, string $path, ?string $message = null, ?Closure $data = null): JsonResponse|RedirectResponse
     {
         if ($request->wantsJson()) {
-            return response()->json(array_filter(['redirect' => $path, 'message' => $message]));
+            return response()->json([
+                ...array_filter(['redirect' => $path, 'message' => $message]),
+                ...($data ? $data() : []),
+            ]);
         }
 
         $response = redirect($path);
