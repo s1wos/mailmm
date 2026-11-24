@@ -2,12 +2,15 @@
 
 namespace App\Models;
 
+use App\Services\MailHtmlPreview;
+use App\Services\MailImageUrl;
 use App\Services\MailParserService;
 use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Facades\Storage;
 
 class Message extends Model
 {
@@ -50,6 +53,11 @@ class Message extends Model
         return ! $this->is_pending && $this->raw_path !== null && $this->raw_size > 0 && $this->raw_sha256 !== null;
     }
 
+    public static function originalPath(string $deliveryKey): string
+    {
+        return 'mail/'.substr($deliveryKey, 0, 2).'/'.$deliveryKey.'.eml';
+    }
+
     public function scopeRetained(Builder $query): Builder
     {
         return $query->where('is_pending', false)->where('received_at', '>', now()->subDays(self::RETENTION_DAYS)->format($this->dateFormat));
@@ -74,6 +82,33 @@ class Message extends Model
         }
 
         return $this->body_text;
+    }
+
+    public function htmlPreview(): ?string
+    {
+        $proxy = MailImageUrl::forMessage($this->id);
+        if ($this->hasOriginal() && preg_match('/\A[a-f0-9]{64}\z/', $this->delivery_key ?? '')
+            && $this->raw_path === self::originalPath($this->delivery_key)) {
+            $stream = null;
+            try {
+                $stream = Storage::disk('local')->readStream($this->raw_path);
+                if (is_resource($stream) && (fstat($stream)['size'] ?? null) === $this->raw_size) {
+                    $digest = hash_init('sha256');
+                    if (hash_update_stream($digest, $stream) === $this->raw_size
+                        && hash_equals($this->raw_sha256, hash_final($digest)) && rewind($stream)) {
+                        return app(MailParserService::class)->htmlPreview($stream, $proxy);
+                    }
+                }
+            } catch (\Exception|\ValueError) {
+                // Keep the archived body readable if the original cannot be opened or parsed.
+            } finally {
+                if (is_resource($stream)) {
+                    fclose($stream);
+                }
+            }
+        }
+
+        return MailHtmlPreview::render($this->body_html ?? '', proxy: $proxy);
     }
 
     public function email(): BelongsTo

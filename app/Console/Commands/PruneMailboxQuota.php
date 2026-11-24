@@ -32,6 +32,7 @@ class PruneMailboxQuota extends Command
                 MailboxSession::ISSUE_LIMIT_PREFIX,
                 MailboxActionLimit::PREFIX,
                 MailboxSocketGrant::CACHE_PREFIX,
+                'mail-images:',
                 ...ThrottleOrdinaryUser::PREFIXES,
             ];
             foreach ($namespaces as $namespace) {

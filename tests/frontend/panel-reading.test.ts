@@ -78,6 +78,16 @@ test('the overview shows UTC days, accessible daily counts, and the share delive
     assert.match(html, /href="\/admin\/messages\/37\?from=overview"/)
 })
 
+test('the panel places formatted mail inside a script-disabled frame', async () => {
+    const html = await render('Message', {
+        user: owner, backUrl: '/admin', forwards: [],
+        letter: { ...letter, html_preview: '<strong>Квитанция</strong>', body_text: 'Чек', attachments: [] },
+    }, '/admin/messages/37')
+    assert.match(html, /<iframe\b[^>]*title="Содержимое письма"/u)
+    assert.match(html, /\bsandbox="[^"]*\ballow-popups\b[^"]*"/u)
+    assert.doesNotMatch(html, /allow-scripts|<strong>Квитанция<\/strong>/u)
+})
+
 test('owners and administrators can forward archive copies while the global switch still controls sending', async () => {
     const page = {
         user: owner, backUrl: '/admin',

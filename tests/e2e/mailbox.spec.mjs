@@ -79,6 +79,79 @@ async function login(page, url, credentials) {
     await expect(page.getByRole('link', { name: 'Открыть почту' }).first()).toBeVisible()
 }
 
+// Warm the disposable proxy cache so the real authenticated image route can serve an
+// offline sender. The browser must never try to contact that sender directly.
+function cacheTestImage(stack, url, mime, bytes) {
+    stack.compose(['exec', '-T', '-u', 'www-data', 'app', 'php', '-r',
+        `require 'vendor/autoload.php';
+         $app = require 'bootstrap/app.php';
+         $app->make(Illuminate\\Contracts\\Console\\Kernel::class)->bootstrap();
+         $digest = hash('sha256', $argv[1]);
+         Illuminate\\Support\\Facades\\Cache::store('file')->put('mail-image:'.(hexdec(substr($digest, 0, 2)) % 64),
+             ['digest' => $digest, 'image' => ['mime' => $argv[2], 'bytes' => base64_decode($argv[3])]], 120);`,
+        '--', url, mime, bytes.toString('base64')])
+}
+
+test('formatted mail keeps the sender’s layout and opens its links in both readers', async ({ page, context, stack }) => {
+    await openRealtimeMailbox(page, stack.url)
+    const recipient = await page.locator('.address-value').textContent()
+    const subject = 'Квитанция за заказ'
+    const destination = 'https://shop.example.test/order?item=1&view=receipt'
+    const imageUrl = 'https://shop.example.test/banner.png'
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aquoAAAAASUVORK5CYII=', 'base64')
+    let imageRequests = 0
+    let proxyRequests = 0
+    await context.route(imageUrl, route => {
+        imageRequests++
+        return route.abort()
+    })
+    cacheTestImage(stack, imageUrl, 'image/png', png)
+    context.on('response', response => {
+        if (response.url().startsWith(stack.url + '/mail-images/') && response.ok()) proxyRequests++
+    })
+    await context.route(destination, route => route.fulfill({ contentType: 'text/plain', body: 'Receipt' }))
+    await deliver(stack.smtp, recipient, {
+        subject, text: 'Ваш заказ оплачен.',
+        html: '<style>.total { color: #285ca0; font-weight: bold }</style>'
+            + '<table style="width:480px;max-width:100%;background:#f2f6fb" cellpadding="16"><tr>'
+            + '<td><img src="cid:logo" alt="Логотип"><h2>Заказ оплачен</h2></td></tr>'
+            + '<tr><td class="total">Итого 900 ₽</td></tr><tr><td>'
+            + '<a style="display:inline-block;padding:10px 18px;background:#285ca0;color:white;border-radius:6px" '
+            + 'href="https://shop.example.test/order?item=1&amp;view=receipt">Открыть квитанцию</a>'
+            + ' <a href="https://shop.example.test/order?item=1&amp;view=receipt">Если не видно кнопки, нажмите сюда</a>'
+            + '</td></tr></table><p>Помощь: https://shop.example.test/help</p>'
+            + '<a href="https://shop.example.test/catalog"><img src="' + imageUrl + '" alt="Баннер"></a>',
+        attachments: [{ filename: 'logo.png', cid: 'logo', content: png }],
+    })
+    await page.getByRole('button', { name: new RegExp(subject) }).click()
+    const mail = page.frameLocator('iframe[title="Содержимое письма"]')
+    const button = mail.getByRole('link', { name: 'Открыть квитанцию' })
+    await expect(button).toHaveAttribute('href', destination)
+    await expect(button).toHaveCSS('background-color', 'rgb(40, 92, 160)')
+    await expect(mail.getByRole('link', { name: /нажмите сюда/ })).toHaveAttribute('href', destination)
+    await expect(mail.getByRole('link', { name: 'https://shop.example.test/help' })).toHaveAttribute('href', 'https://shop.example.test/help')
+    await expect(mail.getByRole('cell', { name: 'Итого 900 ₽' })).toHaveCSS('color', 'rgb(40, 92, 160)')
+    await expect.poll(() => mail.getByAltText('Логотип').evaluate(img => img.naturalWidth)).toBe(1)
+    await expect.poll(() => mail.getByAltText('Баннер').evaluate(img => img.naturalWidth)).toBe(1)
+    await expect(mail.getByAltText('Баннер')).toHaveAttribute('src', /^\/mail-images\/\d+\//)
+    expect(proxyRequests).toBe(1)
+    expect(imageRequests).toBe(0)
+    const opened = page.waitForEvent('popup')
+    await button.click()
+    const receipt = await opened
+    await expect(receipt).toHaveURL(destination)
+    await receipt.close()
+    await expect(mail.getByRole('link', { name: 'Баннер' })).toHaveAttribute('href', 'https://shop.example.test/catalog')
+
+    await login(page, stack.url, stack.admin)
+    await page.getByRole('link', { name: 'Архив писем', exact: true }).first().click()
+    await page.getByRole('link', { name: new RegExp(subject) }).click()
+    await expect(button).toHaveAttribute('href', destination)
+    await expect.poll(() => mail.getByAltText('Баннер').evaluate(img => img.naturalWidth)).toBe(1)
+    expect(proxyRequests).toBe(2)
+    expect(imageRequests).toBe(0)
+})
+
 test('the login and about cards keep each icon beside its heading', async ({ page, stack }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' })
     for (const [path, cards, count] of [['/admin/login', '.login-form-block', 1], ['/about', '.info-card', 3]]) {
@@ -100,6 +173,39 @@ test('the login and about cards keep each icon beside its heading', async ({ pag
             }
         }
     }
+})
+
+test('formatted mail automatically loads a background-only banner through the proxy and fits its reading pane', async ({ page, stack }) => {
+    const banner = 'https://shop.example.test/hero.gif'
+    let requests = 0
+    let directRequests = 0
+    await page.route(banner, route => {
+        directRequests++
+        return route.abort()
+    })
+    cacheTestImage(stack, banner, 'image/gif', Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==', 'base64'))
+    page.on('response', response => {
+        if (response.url().startsWith(stack.url + '/mail-images/') && response.ok()) requests++
+    })
+    await openRealtimeMailbox(page, stack.url)
+    const recipient = await page.locator('.address-value').textContent()
+    await deliver(stack.smtp, recipient, {
+        subject: 'Письмо с баннером',
+        html: '<div style="min-height:100vh;padding:40px 0;background-image:url(' + banner + ')">Баннер</div>',
+    })
+    await page.getByRole('button', { name: /Письмо с баннером/ }).click()
+    await expect.poll(() => requests).toBe(1)
+    expect(directRequests).toBe(0)
+    const iframe = page.getByTitle('Содержимое письма')
+    const heights = await iframe.evaluate(async frame => {
+        const samples = []
+        for (let i = 0; i < 10; i++) {
+            await new Promise(requestAnimationFrame)
+            samples.push(frame.clientHeight)
+        }
+        return samples
+    })
+    expect(new Set(heights.slice(-4)).size).toBe(1)
 })
 
 test('the dashboard counts browsers with visible tabs and drops the last hidden tab', async ({ page, browser, stack }) => {

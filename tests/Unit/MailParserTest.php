@@ -115,6 +115,92 @@ MAIL;
         self::assertSame("Confirm ($url)\nhttp://example.test/code\nContact", $mail->bodyText);
     }
 
+    public function test_html_preview_selects_related_roots_and_keeps_content_ids_local_to_each_section(): void
+    {
+        $image = 'R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+        $raw = "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=outer\r\n\r\n"
+            ."--outer\r\nContent-Type: text/plain\r\n\r\nFirst <note>\r\n"
+            ."--outer\r\nContent-Type: multipart/related; boundary=one; start=\"<page>\"\r\n\r\n"
+            ."--one\r\nContent-Type: image/gif; name=logo.gif\r\nContent-ID: <logo>\r\nContent-Transfer-Encoding: base64\r\n\r\n$image\r\n"
+            ."--one\r\nContent-Type: text/html; name=index.html\r\nContent-ID: <page>\r\n\r\n<p>Page one<img src=\"cid:logo\"></p>\r\n--one--\r\n"
+            ."--outer\r\nContent-Type: multipart/related; boundary=two\r\n\r\n"
+            ."--two\r\nContent-Type: text/html\r\n\r\n<p>Page two<img src=\"cid:logo\" alt=\"missing\"></p>\r\n--two--\r\n"
+            ."--outer\r\nContent-Type: text/html; name=file.html\r\n\r\n<p>Named file contents</p>\r\n"
+            ."--outer\r\nContent-Type: multipart/digest; boundary=digest\r\n\r\n--digest\r\nContent-Type: text/html\r\n\r\nDigest contents\r\n--digest--\r\n"
+            ."--outer\r\nContent-Type: text/html\r\nContent-Disposition: attachment\r\n\r\nAttached HTML\r\n"
+            ."--outer\r\nContent-Type: text/plain\r\n\r\nLast remark\r\n--outer--\r\n";
+
+        $preview = (new MailParserService)->htmlPreview($raw);
+        self::assertIsString($preview);
+        self::assertMatchesRegularExpression('~First &lt;note&gt;.*Page one.*Page two.*Last remark~s', $preview);
+        self::assertSame(1, substr_count($preview, 'data:image/gif;base64,'.$image));
+        self::assertStringNotContainsString('Named file contents', $preview);
+        self::assertStringNotContainsString('Attached HTML', $preview);
+        self::assertStringNotContainsString('Digest contents', $preview);
+    }
+
+    public function test_plain_only_message_has_no_html_preview(): void
+    {
+        self::assertNull((new MailParserService)->htmlPreview("Content-Type: text/plain\r\n\r\n<a>text</a>"));
+    }
+
+    public function test_nested_remote_image_newsletter_uses_the_message_proxy(): void
+    {
+        $raw = "MIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=a\r\n\r\n"
+            ."--a\r\nContent-Type: text/plain\r\n\r\nNewsletter\r\n"
+            ."--a\r\nContent-Type: multipart/related; boundary=b\r\n\r\n"
+            ."--b\r\nContent-Type: text/html\r\n\r\n<img src=\"//cdn.example.test/news.png\">\r\n--b--\r\n--a--\r\n";
+        $parser = new MailParserService;
+
+        self::assertNull($parser->htmlPreview($raw));
+        $preview = $parser->htmlPreview($raw, fn () => '/mail-images/9/news');
+        self::assertStringContainsString('src="/mail-images/9/news"', $preview ?? '');
+    }
+
+    public function test_standalone_raster_is_visible_unless_invalid_or_marked_as_an_attachment(): void
+    {
+        $gif = 'R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+        $headers = "MIME-Version: 1.0\r\nContent-Type: image/gif; name=receipt.gif\r\nContent-Transfer-Encoding: base64\r\n";
+        $parser = new MailParserService;
+        $preview = $parser->htmlPreview($headers."\r\n".$gif);
+        self::assertIsString($preview);
+        self::assertStringContainsString('src="data:image/gif;base64,'.$gif.'"', $preview);
+        self::assertNull($parser->htmlPreview($headers."\r\n".base64_encode('broken image')));
+        self::assertNull($parser->htmlPreview($headers."Content-Disposition: attachment; filename=receipt.gif\r\n\r\n".$gif));
+    }
+
+    public function test_mixed_mail_displays_its_inline_picture_between_text_sections_and_keeps_attached_images_separate(): void
+    {
+        $gif = 'R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+        $imagePart = "Content-Type: image/gif; name=picture.gif\r\nContent-Transfer-Encoding: base64\r\n";
+        $raw = "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n"
+            ."--b\r\nContent-Type: text/plain\r\n\r\nYour receipt\r\n"
+            ."--b\r\n".$imagePart."Content-Disposition: inline; filename=picture.gif\r\n\r\n$gif\r\n"
+            ."--b\r\nContent-Type: text/plain\r\n\r\nThank you\r\n"
+            ."--b\r\n".$imagePart."Content-Disposition: attachment; filename=receipt-copy.gif\r\n\r\n$gif\r\n--b--\r\n";
+        $parser = new MailParserService;
+        $preview = $parser->htmlPreview($raw);
+        self::assertIsString($preview);
+        self::assertMatchesRegularExpression('~Your receipt.*<img.*Thank you~s', $preview);
+        self::assertSame(1, substr_count($preview, 'data:image/gif;base64,'.$gif));
+        self::assertContains('receipt-copy.gif', array_column($parser->parse($raw)->attachments, 'filename'));
+    }
+
+    public function test_signed_image_only_body_keeps_its_link_and_unnamed_inline_image(): void
+    {
+        $image = 'R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+        $raw = "MIME-Version: 1.0\r\nContent-Type: multipart/signed; boundary=signed; protocol=\"application/pgp-signature\"\r\n\r\n"
+            ."--signed\r\nContent-Type: multipart/related; boundary=body\r\n\r\n"
+            ."--body\r\nContent-Type: text/html\r\n\r\n<a href=\"https://example.test/open\"><img src=\"cid:logo\"></a>\r\n"
+            ."--body\r\nContent-Type: image/gif\r\nContent-ID: <logo>\r\nContent-Transfer-Encoding: base64\r\n\r\n$image\r\n--body--\r\n"
+            ."--signed\r\nContent-Type: application/pgp-signature\r\n\r\nDetached signature\r\n--signed--\r\n";
+        $preview = (new MailParserService)->htmlPreview($raw);
+        self::assertIsString($preview);
+        self::assertStringContainsString('href="https://example.test/open"', $preview);
+        self::assertStringContainsString('data:image/gif;base64,'.$image, $preview);
+        self::assertStringNotContainsString('Detached signature', $preview);
+    }
+
     public function test_related_root_with_a_content_id_is_used_when_the_plain_alternative_is_empty(): void
     {
         $raw = <<<'MAIL'

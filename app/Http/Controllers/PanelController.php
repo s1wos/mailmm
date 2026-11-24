@@ -259,6 +259,7 @@ class PanelController extends Controller
             'serverTime' => now()->toISOString(),
             'letter' => $letter->panelSummary() + [
                 'body_text' => $letter->readableBody(),
+                'html_preview' => $letter->htmlPreview(),
                 'attachments' => $attachments,
                 'forwarding' => ForwardingRequests::availability($letter),
             ],

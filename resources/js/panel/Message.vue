@@ -5,6 +5,8 @@ import MessageForwarding from './MessageForwarding.vue'
 import { formatTimestamp } from './format'
 import type { MessagePage } from './types'
 import { useActionGuard } from '../useActionGuard'
+import PlainMailBody from '../components/PlainMailBody.vue'
+import HtmlMailBody from '../components/HtmlMailBody.vue'
 
 const props = defineProps<{ page: MessagePage }>()
 const actions = useActionGuard(() => props.page.user.is_admin)
@@ -33,7 +35,8 @@ function returnToList(event: MouseEvent) {
                 <dd><time :datetime="page.letter.received_at">{{ formatTimestamp(page.letter.received_at) }} UTC</time></dd>
             </div>
         </dl>
-        <div class="message-body">{{ page.letter.body_text || 'Текст письма отсутствует.' }}</div>
+        <HtmlMailBody v-if="page.letter.html_preview" :key="page.letter.id" :html="page.letter.html_preview" />
+        <div v-else class="message-body"><PlainMailBody :text="page.letter.body_text || 'Текст письма отсутствует.'" /></div>
         <template v-if="page.letter.attachments.length">
             <h2>Вложения <span class="count">{{ page.letter.attachments.length }}</span></h2>
             <ul class="attachments">

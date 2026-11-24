@@ -19,6 +19,7 @@ class MessageResource extends JsonResource
             'from' => $this->from,
             'subject' => $this->subject,
             'body_text' => $this->resource->readableBody(),
+            'html_preview' => $this->resource->htmlPreview(),
             'received_at' => $this->received_at->toISOString(),
             'expires_at' => Message::expiresAt($this->received_at)->toISOString(),
             'forwarding' => $this->when($owner && ! $owner->is_admin, fn () => ForwardingRequests::availability($this->resource)),

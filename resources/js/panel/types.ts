@@ -81,6 +81,7 @@ export interface MessagePage {
     serverTime: string
     letter: PanelLetterSummary & {
         body_text: string | null
+        html_preview: string | null
         attachments: { filename: string, url: string }[]
         forwarding?: ForwardAvailability
     }

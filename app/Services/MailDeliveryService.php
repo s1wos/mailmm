@@ -42,7 +42,7 @@ class MailDeliveryService
         }
 
         $original = [
-            'raw_path' => 'mail/'.substr($key, 0, 2).'/'.$key.'.eml',
+            'raw_path' => Message::originalPath($key),
             'raw_size' => strlen($raw),
             'raw_sha256' => hash('sha256', $raw),
         ];

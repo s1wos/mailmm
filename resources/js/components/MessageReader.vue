@@ -3,6 +3,8 @@ import { ArrowLeft, Download, Forward, Paperclip } from '@lucide/vue'
 import { RouterLink } from 'vue-router'
 import type { EmailMessage, MessageSummary } from '../model/types'
 import MailboxWarning from './MailboxWarning.vue'
+import PlainMailBody from './PlainMailBody.vue'
+import HtmlMailBody from './HtmlMailBody.vue'
 import { useEmailStore } from '../stores/emailStore'
 import { useActionGuard } from '../useActionGuard'
 
@@ -31,7 +33,8 @@ function fileSize(size: number) {
         <MailboxWarning :message="error" />
         <button v-if="error" type="button" class="text-btn" @click="$emit('retry')">Повторить загрузку письма</button>
         <p v-else-if="!message" role="status" class="letter-body">Загружаем письмо…</p>
-        <p v-else class="letter-body">{{ message.body_text?.trim() || 'В письме нет текста.' }}</p>
+        <HtmlMailBody v-else-if="message.html_preview" :key="message.id" :html="message.html_preview" />
+        <p v-else class="letter-body"><PlainMailBody :text="message.body_text?.trim() || 'В письме нет текста.'" /></p>
         <div v-if="message?.attachments.length" class="attachments">
             <h4><Paperclip /> Вложения · {{ message.attachments.length }}</h4>
             <ul>

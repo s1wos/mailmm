@@ -43,4 +43,5 @@ COPY nginx/https.conf /etc/nginx/mailmm/https.conf
 COPY --from=runtime /var/www/public /var/www/public
 
 FROM runtime AS app
+COPY deploy/php-fpm/mail-images.conf /usr/local/etc/php-fpm.d/mail-images.conf
 CMD ["php-fpm"]

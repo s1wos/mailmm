@@ -261,10 +261,51 @@ class MailDeliveryTest extends TestCase
             $message->update(['body_text' => $storedText]);
             $expected = $storedText ?: $text;
             $this->getJson('/api/messages/'.$message->id)->assertOk()->assertJsonPath('data.body_text', $expected)
+                ->assertJsonPath('data.html_preview', fn ($preview) => is_string($preview) && str_contains($preview, 'href="https://example.test/order"'))
                 ->assertJsonMissingPath('data.body_html');
             $this->getJson('/admin/messages/'.$message->id)->assertOk()->assertJsonPath('letter.body_text', $expected)
+                ->assertJsonPath('letter.html_preview', fn ($preview) => is_string($preview) && str_contains($preview, 'href="https://example.test/order"'))
                 ->assertJsonMissingPath('letter.body_html');
         }
+    }
+
+    public function test_both_readers_show_html_from_the_verified_original_and_fall_back_to_stored_text(): void
+    {
+        $this->withoutVite();
+        $owner = User::factory()->create(['email' => 'reader@mail.test']);
+        $owner->mailbox()->create(['email' => $owner->email]);
+        $raw = "From: shop@example.org\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=alt\r\n\r\n"
+            ."--alt\r\nContent-Type: text/plain\r\n\r\nOrder summary\r\n"
+            ."--alt\r\nContent-Type: text/html\r\n\r\n<p><a href=\"https://example.test/order\">View order</a></p>\r\n--alt--\r\n";
+        self::assertSame(0, $this->deliver($owner->email, $raw));
+        $letter = Message::sole();
+        $path = $letter->raw_path;
+        self::assertNull($letter->body_html);
+        $disk = Storage::disk('local');
+        $this->actingAs($owner);
+        $this->getJson('/api/messages')->assertOk()->assertJsonMissingPath('data.0.html_preview');
+        foreach (['api' => 'data', 'admin' => 'letter'] as $scope => $key) {
+            $preview = $this->getJson("/$scope/messages/$letter->id")->assertOk()
+                ->assertJsonMissingPath("$key.body_html")->assertJsonPath("$key.body_text", 'Order summary')->json("$key.html_preview");
+            self::assertIsString($preview);
+            self::assertStringContainsString('href="https://example.test/order"', $preview);
+            self::assertStringNotContainsString('Order summary', $preview);
+        }
+        self::assertSame($raw, $disk->get($path));
+        $disk->put($path, str_replace('example.test/order', 'example.test/other', $raw));
+        $this->travel(1)->second();
+        $this->getJson("/api/messages/$letter->id")->assertOk()->assertJsonPath('data.body_text', 'Order summary')
+            ->assertJsonPath('data.html_preview', null);
+        $disk->put('mail/elsewhere.eml', $raw);
+        $letter->update(['raw_path' => 'mail/elsewhere.eml']);
+        $this->travel(1)->second();
+        $this->getJson("/admin/messages/$letter->id")->assertOk()->assertJsonPath('letter.body_text', 'Order summary')
+            ->assertJsonPath('letter.html_preview', null);
+        $letter->update(['raw_path' => $path]);
+        $disk->delete($path);
+        $this->travel(1)->second();
+        $this->getJson("/api/messages/$letter->id")->assertOk()->assertJsonPath('data.body_text', 'Order summary')
+            ->assertJsonPath('data.html_preview', null);
     }
 
     public function test_bcc_delivers_only_to_the_envelope_recipient_using_server_time_and_private_files(): void

@@ -97,6 +97,106 @@ class MailParserService
             ?? $container->getChild(0);
     }
 
+    /** @param resource|string $original */
+    public function htmlPreview(mixed $original, ?callable $proxy = null): ?string
+    {
+        $message = (new MailMimeParser)->parse($original, false);
+        $remainingImageBytes = null;
+        [$hasHtml, $markup] = $this->previewPart($message, $remainingImageBytes, $proxy);
+
+        return $hasHtml ? $markup : null;
+    }
+
+    /** @return array{bool, string} Whether the section includes HTML, and its safe markup. */
+    private function previewPart(IMessagePart $part, ?int &$remainingImageBytes, ?callable $proxy, array $images = [], bool $relatedRoot = false): array
+    {
+        $disposition = $part->getContentDisposition(null);
+        if ($disposition === 'attachment') {
+            return [false, ''];
+        }
+        $parent = $part->getParent();
+        if (($parent === null || $relatedRoot || ($disposition === 'inline' && $parent->getContentType() === 'multipart/mixed'))
+            && ($image = $this->bitmapDataUrl($part)) !== null) {
+            $markup = MailHtmlPreview::render('<img src="cid:picture" alt="">', ['picture' => $image], $remainingImageBytes, $proxy);
+
+            return [$markup !== null, $markup ?? ''];
+        }
+        if (! $relatedRoot && ($part->getFilename() ?? '') !== '') {
+            return [false, ''];
+        }
+        $type = $part->getContentType();
+        if ($type === 'text/html') {
+            $markup = MailHtmlPreview::render($this->text($part->getContent()) ?? '', $images, $remainingImageBytes, $proxy);
+
+            return [$markup !== null, $markup ?? ''];
+        }
+        if ($type === 'text/plain') {
+            $text = $this->text($part->getContent()) ?? '';
+
+            return [false, trim($text) === '' ? '' : '<pre>'.htmlspecialchars($text, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').'</pre>'];
+        }
+        if (! $part instanceof IMimePart || ! $part->isMultiPart() || ! str_starts_with($type, 'multipart/') || $type === 'multipart/digest') {
+            return [false, ''];
+        }
+        if ($type === 'multipart/related') {
+            $root = $this->relatedRoot($part);
+
+            return $root ? $this->previewPart($root, $remainingImageBytes, $proxy, $this->relatedImages($part, $root), relatedRoot: true) : [false, ''];
+        }
+
+        $children = $part->getChildParts();
+        if ($type === 'multipart/alternative') {
+            $plain = '';
+            foreach (array_reverse($children) as $child) {
+                [$hasHtml, $markup] = $this->previewPart($child, $remainingImageBytes, $proxy, $images);
+                if ($hasHtml) {
+                    return [true, $markup];
+                }
+                if ($plain === '') {
+                    $plain = $markup;
+                }
+            }
+
+            return [false, $plain];
+        }
+
+        $hasHtml = false;
+        $sections = [];
+        foreach ($children as $child) {
+            [$childHasHtml, $markup] = $this->previewPart($child, $remainingImageBytes, $proxy, $images);
+            $hasHtml = $hasHtml || $childHasHtml;
+            if ($markup !== '') {
+                $sections[] = $markup;
+            }
+        }
+
+        return [$hasHtml, implode("\n", $sections)];
+    }
+
+    private function relatedImages(IMimePart $part, IMessagePart $root): array
+    {
+        $images = [];
+        foreach ($part->getChildParts() as $child) {
+            $id = trim($child->getContentId() ?? '', '<>');
+            if ($child !== $root && $id !== '' && $child->getContentDisposition() !== 'attachment'
+                && ($image = $this->bitmapDataUrl($child)) !== null) {
+                $images[$id] = $image;
+            }
+        }
+
+        return $images;
+    }
+
+    private function bitmapDataUrl(IMessagePart $part): ?string
+    {
+        $type = $part->getContentType();
+        if (! in_array($type, ['image/png', 'image/jpeg', 'image/gif', 'image/webp'], true)) {
+            return null;
+        }
+
+        return 'data:'.$type.';base64,'.base64_encode((string) $part->getBinaryContentStream());
+    }
+
     private function bodyText(IMessagePart $part): ?string
     {
         if ($part->getContentDisposition() === 'attachment') {
