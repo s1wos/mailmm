@@ -11,12 +11,14 @@ export class PanelHttpError extends Error {
     status: number
     errors: Record<string, string[]>
     domains?: MailboxesPage['domains']
+    code?: string
 
-    constructor(status: number, message: string, errors: Record<string, string[]> = {}, domains?: MailboxesPage['domains']) {
+    constructor(status: number, message: string, errors: Record<string, string[]> = {}, domains?: MailboxesPage['domains'], code?: string) {
         super(message)
         this.status = status
         this.errors = errors
         this.domains = domains
+        this.code = code
     }
 }
 
@@ -42,12 +44,12 @@ export async function panelRequest<T>(path: string, options: RequestInit = {}): 
     if (response.ok) return await response.json() as T
 
     const data = await response.json().catch(() => null)
-    if (method !== 'GET' && !options.signal?.aborted) {
+    if ((method !== 'GET' || headers.has('X-Panel-User')) && !options.signal?.aborted) {
         if (response.status === 401 || response.status === 419) {
             globalThis.window?.dispatchEvent(new Event('panel-session-expired'))
         } else if (response.status === 403 || response.status === 404 || data?.code === 'panel_user_changed') {
             globalThis.window?.dispatchEvent(new Event('panel-check-session'))
         }
     }
-    throw new PanelHttpError(response.status, messages[response.status] ?? 'Не удалось выполнить запрос. Повторите позже.', data?.errors, data?.domains)
+    throw new PanelHttpError(response.status, messages[response.status] ?? 'Не удалось выполнить запрос. Повторите позже.', data?.errors, data?.domains, data?.code)
 }

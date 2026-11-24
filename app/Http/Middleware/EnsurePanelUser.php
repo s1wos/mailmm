@@ -11,7 +11,7 @@ class EnsurePanelUser
     public function handle(Request $request, Closure $next): Response
     {
         $expected = $request->header('X-Panel-User');
-        if (! $request->isMethodSafe() && $expected !== null && $expected !== (string) $request->user()->id) {
+        if ($expected !== null && $expected !== (string) $request->user()->id) {
             return response()->json(['code' => 'panel_user_changed'], 409);
         }
 

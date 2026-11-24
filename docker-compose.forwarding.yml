@@ -1,0 +1,46 @@
+services:
+  forward-worker:
+    networks:
+      default: {}
+      submission:
+        ipv4_address: 172.29.252.3
+    extra_hosts:
+      - "${MX_HOST:?Set MX_HOST}:172.29.252.2"
+
+  outbound:
+    image: ${COMPOSE_PROJECT_NAME}-smtp:${MAILMM_TAG:-local}
+    pull_policy: never
+    entrypoint: ["sh", "/etc/mailmm-forwarding/postfix.sh"]
+    restart: unless-stopped
+    environment:
+      MX_HOST: ${MX_HOST:?Set MX_HOST}
+      FORWARD_SIGNING_DOMAIN: ${FORWARD_SIGNING_DOMAIN:-mailmm.my}
+    networks:
+      submission:
+        ipv4_address: 172.29.252.2
+    volumes:
+      - outbound-spool:/var/spool/postfix
+      - certificates:/etc/letsencrypt:ro
+      - ${FORWARD_CONFIG_DIR:-./deploy/forwarding}:/etc/mailmm-forwarding:ro
+
+  forward-signer:
+    image: rspamd/rspamd:3.14.1
+    restart: unless-stopped
+    network_mode: service:outbound
+    command: ["/usr/bin/rspamd", "-f", "-c", "/etc/mailmm-forwarding/rspamd.conf"]
+    environment:
+      MX_HOST: ${MX_HOST:?Set MX_HOST}
+      FORWARD_SIGNING_DOMAIN: ${FORWARD_SIGNING_DOMAIN:-mailmm.my}
+      FORWARD_SERVICE_ADDRESS: ${FORWARD_SERVICE_ADDRESS:?Set FORWARD_SERVICE_ADDRESS}
+    volumes:
+      - ${FORWARD_CONFIG_DIR:-./deploy/forwarding}:/etc/mailmm-forwarding:ro
+      - ${FORWARD_KEYS_DIR:-/opt/mailmm/forwarding/keys}:/run/mailmm-keys:ro
+
+networks:
+  submission:
+    ipam:
+      config:
+        - subnet: 172.29.252.0/28
+
+volumes:
+  outbound-spool:

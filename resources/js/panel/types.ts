@@ -1,4 +1,4 @@
-import type { MailboxDomainOption } from '../model/types'
+import type { ForwardAvailability, MailboxDomainOption } from '../model/types'
 
 export interface PanelUser {
     id: number
@@ -49,6 +49,29 @@ export interface ArchivePage {
     recipient: string
     messages: Paginated<PanelLetterSummary>
     listQuery: Record<string, string | number>
+    forwarding?: ForwardingRule | null
+}
+
+export interface ForwardingRule {
+    sending_enabled: boolean
+    status: 'disabled' | 'pending' | 'active'
+    version: number
+    destination: string | null
+    activated_at: string | null
+    code_expires_at: string | null
+    resend_at: string | null
+    disabled_reason: string | null
+    last_error_code: string | null
+}
+
+export interface MailForward {
+    id: string
+    mode: 'manual' | 'auto'
+    request_id: string | null
+    status: 'queued' | 'preparing' | 'submitting' | 'accepted' | 'failed' | 'unknown' | 'cancelled' | 'bounced'
+    destination: string
+    error_code: string | null
+    created_at: string
 }
 
 export interface MessagePage {
@@ -59,7 +82,9 @@ export interface MessagePage {
     letter: PanelLetterSummary & {
         body_text: string | null
         attachments: { filename: string, url: string }[]
+        forwarding?: ForwardAvailability
     }
+    forwards: MailForward[]
 }
 
 export interface MailboxesPage {

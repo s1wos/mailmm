@@ -94,6 +94,21 @@ class MailDeliveryTest extends TestCase
         self::assertTrue(now()->equalTo(Message::where('email_id', $new->id)->sole()->received_at));
     }
 
+    public function test_archive_retains_the_complete_original_and_removes_it_at_expiry(): void
+    {
+        $raw = self::TRACE.self::RAW;
+        self::assertSame(0, $this->deliver('archive@mail.test', str_replace("\r\n", "\n", $raw), postfix: true));
+        $message = Message::sole();
+        self::assertTrue($message->hasOriginal());
+        self::assertSame($raw, Storage::disk('local')->get($message->raw_path));
+        self::assertSame(hash('sha256', $raw), $message->raw_sha256);
+        self::assertSame(strlen($raw), $message->raw_size);
+        self::assertFalse((new Message)->hasOriginal());
+        $this->travelTo(Message::expiresAt($message->received_at));
+        $this->artisan('mail:prune')->assertSuccessful();
+        Storage::disk('local')->assertMissing($message->raw_path);
+    }
+
     public function test_bcc_and_retried_queue_deliveries_stay_with_the_full_address_after_issuance_stops(): void
     {
         Event::fake([NewMessageReceived::class]);
@@ -350,7 +365,7 @@ class MailDeliveryTest extends TestCase
         }
         self::assertSame(0, $this->deliver('first@mail.test', str_replace('ABCDEF', '012345', self::RAW)));
         self::assertSame(3, Message::count());
-        self::assertCount(6, Storage::disk('local')->allFiles());
+        self::assertCount(9, Storage::disk('local')->allFiles());
         Event::assertNotDispatched(NewMessageReceived::class);
     }
 
@@ -393,7 +408,7 @@ class MailDeliveryTest extends TestCase
         $disk->delete('mail');
         self::assertSame(0, $this->deliver('guest@mail.test'));
         self::assertSame(1, Message::query()->retained()->count());
-        self::assertCount(2, $disk->allFiles());
+        self::assertCount(3, $disk->allFiles());
     }
 
     public function test_retry_after_parser_upgrade_refreshes_a_pending_body_and_file_manifest(): void
@@ -428,7 +443,7 @@ class MailDeliveryTest extends TestCase
         self::assertSame(0, $this->deliver('guest@mail.test'));
         self::assertSame(0, $this->deliver('guest@mail.test'));
         self::assertSame(1, Message::query()->retained()->count());
-        self::assertCount(2, Storage::disk('local')->allFiles());
+        self::assertCount(3, Storage::disk('local')->allFiles());
     }
 
     public function test_database_queue_publishes_the_letter_and_notification_atomically(): void
@@ -495,6 +510,7 @@ class MailDeliveryTest extends TestCase
         $path = Message::sole()->attachments[1]['path'];
         $disk->delete($path);
         $disk->put($path.'/obstruction', 'occupied');
+
         $this->artisan('mail:prune')->assertFailed();
         self::assertSame(1, Message::count());
         self::assertSame(0, Message::query()->retained()->count());
@@ -524,13 +540,13 @@ class MailDeliveryTest extends TestCase
         $this->travelTo(now()->subSecond());
         self::assertSame(3, Message::query()->retained()->count());
         $this->artisan('mail:prune')->assertSuccessful();
-        self::assertCount(6, Storage::disk('local')->allFiles());
+        self::assertCount(9, Storage::disk('local')->allFiles());
         $this->travel(1)->seconds();
         self::assertSame(0, Message::query()->retained()->count());
         self::assertSame(0, $this->deliver($permanent->email, "From: new@example.org\n\nNew"));
         $this->artisan('mail:prune')->assertSuccessful();
         self::assertSame('New', Message::sole()->body_text);
-        self::assertSame([], Storage::disk('local')->allFiles());
+        self::assertSame([Message::sole()->raw_path], Storage::disk('local')->allFiles());
         self::assertNotNull($guest->fresh());
         self::assertNotNull($permanent->fresh());
         $this->travel(365)->days();

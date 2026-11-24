@@ -7,7 +7,8 @@ use Illuminate\Support\Facades\Cache;
 class LogCollectionHealth
 {
     private const KEY = 'admin-error-log-health';
-    public const SERVICES = ['app', 'worker', 'scheduler', 'reverb', 'migrate', 'smtp', 'nginx'];
+
+    public const SERVICES = ['app', 'worker', 'forward-worker', 'scheduler', 'reverb', 'migrate', 'smtp', 'nginx'];
 
     /** @param array<string, bool> $checks */
     public static function record(array $checks): void
@@ -46,6 +47,7 @@ class LogCollectionHealth
                 $source['available'] = false;
             }
         }
+
         return ['online' => $online, 'sources' => (object) $sources];
     }
 }

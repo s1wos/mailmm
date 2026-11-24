@@ -19,6 +19,21 @@ x-runtime: &runtime
     MAILBOX_DOMAIN: ${MAILBOX_DOMAIN:-mailmm.test}
     MX_HOST: ${MX_HOST:-mx.mailmm.test}
     MAILBOX_MAX_MESSAGE_BYTES: ${MAILBOX_MAX_MESSAGE_BYTES-10485760}
+    FORWARD_MANUAL_ENABLED: ${FORWARD_MANUAL_ENABLED:-false}
+    FORWARD_AUTO_ENABLED: ${FORWARD_AUTO_ENABLED:-false}
+    FORWARD_MANUAL_ENABLED_AT: ${FORWARD_MANUAL_ENABLED_AT:-}
+    FORWARD_AUTO_ENABLED_AT: ${FORWARD_AUTO_ENABLED_AT:-}
+    FORWARD_SERVICE_ADDRESS: ${FORWARD_SERVICE_ADDRESS:-}
+    FORWARD_BOUNCE_DOMAIN: ${FORWARD_BOUNCE_DOMAIN:-}
+    FORWARD_SCANNER_URL: ${FORWARD_SCANNER_URL:-http://forward-filter:11333/checkv2}
+    FORWARD_MAX_BYTES: ${FORWARD_MAX_BYTES:-33554432}
+    FORWARD_CODES_PER_MAILBOX: ${FORWARD_CODES_PER_MAILBOX:-5}
+    FORWARD_CODES_PER_DESTINATION: ${FORWARD_CODES_PER_DESTINATION:-5}
+    FORWARD_MANUAL_PER_USER: ${FORWARD_MANUAL_PER_USER:-20}
+    FORWARD_AUTO_PER_MAILBOX: ${FORWARD_AUTO_PER_MAILBOX:-100}
+    FORWARD_PER_DESTINATION: ${FORWARD_PER_DESTINATION:-100}
+    FORWARD_TOTAL: ${FORWARD_TOTAL:-1000}
+    FORWARD_HOURLY_BYTES: ${FORWARD_HOURLY_BYTES:-104857600}
     SESSION_DRIVER: database
     SESSION_LIFETIME: ${SESSION_LIFETIME:-1440}
     SESSION_SECURE_COOKIE: ${SESSION_SECURE_COOKIE:-false}
@@ -86,6 +101,9 @@ services:
 
   app:
     <<: *runtime
+    environment:
+      <<: *app-env
+      FORWARD_WEBHOOK_SECRET: ${FORWARD_WEBHOOK_SECRET:-}
     build:
       context: .
       target: app
@@ -105,6 +123,34 @@ services:
     <<: *runtime
     user: www-data
     command: ["php", "artisan", "queue:work", "--sleep=1", "--tries=5", "--backoff=5"]
+
+  forward-worker:
+    <<: *runtime
+    user: www-data
+    environment:
+      <<: *app-env
+      FORWARD_MANUAL_DSN: ${FORWARD_MANUAL_DSN:-}
+      FORWARD_AUTO_DSN: ${FORWARD_AUTO_DSN:-}
+      FORWARD_SMTP_TIMEOUT: ${FORWARD_SMTP_TIMEOUT:-15}
+    command: ["php", "artisan", "queue:work", "forwarding", "--queue=forwarding", "--sleep=1", "--timeout=60"]
+
+  forward-filter:
+    image: rspamd/rspamd:3.14.1
+    profiles: [forwarding]
+    volumes:
+      - ./deploy/rspamd/worker-normal.inc:/etc/rspamd/local.d/worker-normal.inc:ro
+      - ./deploy/rspamd/milter_headers.conf:/etc/rspamd/local.d/milter_headers.conf:ro
+      - ./deploy/rspamd/antivirus.conf:/etc/rspamd/local.d/antivirus.conf:ro
+    depends_on:
+      - forward-antivirus
+    restart: unless-stopped
+
+  forward-antivirus:
+    image: clamav/clamav:1.4
+    profiles: [forwarding]
+    volumes:
+      - antivirus-data:/var/lib/clamav
+    restart: unless-stopped
 
   log-reader:
     image: nginx:stable-alpine
@@ -194,6 +240,7 @@ networks:
     internal: true
 
 volumes:
+  antivirus-data:
   database:
   attachments:
   spool:

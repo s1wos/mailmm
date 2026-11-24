@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
-import { AtSign, Check, Clock3, Copy, Infinity as InfinityIcon, Repeat2, X } from '@lucide/vue'
+import { AtSign, Check, Clock3, Copy, Forward, Infinity as InfinityIcon, Repeat2, X } from '@lucide/vue'
+import { RouterLink } from 'vue-router'
 import { useEmailStore } from '../stores/emailStore'
 import { useActionGuard } from '../useActionGuard'
 import type { AddressFormat } from '../model/types'
@@ -162,6 +163,9 @@ async function confirmRotation() {
                 <button v-if="!permanent" type="button" class="btn change-btn" :disabled="!store.mailbox || store.rotating" @click="openRotation">
                     <Repeat2 aria-hidden="true" /> Сменить адрес
                 </button>
+                <RouterLink v-else-if="store.panelUrl && !store.isAdmin" class="btn change-btn" :to="store.panelUrl + '#auto-forwarding'">
+                    <Forward aria-hidden="true" /> Автопересылка
+                </RouterLink>
             </div>
             <span class="visually-hidden" role="status">{{ copied ? 'Адрес скопирован' : '' }}</span>
             <MailboxWarning :message="copyState === 'manual' ? 'Адрес выделен. Скопируйте его через меню браузера.' : ''" />

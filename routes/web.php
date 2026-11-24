@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\ForwardingController;
 use App\Http\Controllers\PanelController;
 use App\Http\Controllers\PanelDomainController;
 use App\Http\Controllers\PanelErrorLogController;
@@ -35,6 +36,16 @@ Route::prefix('admin')->group(function () {
         Route::get('/messages/{message}', [PanelController::class, 'show'])->whereNumber('message')->middleware(LimitRepeatedAction::class.':panel')->name('panel.message');
         Route::get('/messages/{message}/attachments/{index}', [PanelController::class, 'attachment'])
             ->whereNumber(['message', 'index'])->name('panel.attachment');
+        Route::post('/messages/{message}/forwards', [ForwardingController::class, 'send'])->whereNumber('message');
+        Route::get('/messages/{message}/forwards/{forward}', [ForwardingController::class, 'status'])
+            ->whereNumber('message')->whereUuid('forward');
+        Route::prefix('account/forwarding')->middleware('can:change-mailbox-password')->group(function () {
+            Route::put('/', [ForwardingController::class, 'register'])
+                ->middleware(ThrottleOrdinaryUser::with(5, 1, ThrottleOrdinaryUser::PREFIXES['forwarding-password']));
+            Route::post('/verify', [ForwardingController::class, 'verify']);
+            Route::post('/resend', [ForwardingController::class, 'resend']);
+            Route::delete('/', [ForwardingController::class, 'disable']);
+        });
 
         Route::middleware('can:administer-mail')->group(function () {
             Route::get('/active-users', [PanelController::class, 'activeUsers'])->name('panel.active-users');

@@ -43,4 +43,11 @@ export interface MessagePage {
 export interface EmailMessage extends MessageHeader {
     body_text: string | null
     attachments: Attachment[]
+    forwarding?: ForwardAvailability
+}
+
+export interface ForwardAvailability {
+    available: boolean
+    reason: 'mode_disabled' | null
+    content: 'original' | 'archive'
 }

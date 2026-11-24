@@ -9,6 +9,7 @@ use App\Services\MailboxSocketGrant;
 use Illuminate\Cache\DatabaseStore;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 
 class PruneMailboxQuota extends Command
 {
@@ -18,6 +19,7 @@ class PruneMailboxQuota extends Command
 
     public function handle(): int
     {
+        DB::table('forwarding_quota_buckets')->where('hour', '<', now('UTC')->startOfHour()->timestamp)->delete();
         $name = config('cache.limiter') ?? config('cache.default');
         $store = Cache::store($name)->getStore();
         if (! $store instanceof DatabaseStore) {

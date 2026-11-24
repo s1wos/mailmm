@@ -6,12 +6,13 @@ import PanelIcon from './PanelIcon.vue'
 import PanelLetters from './PanelLetters.vue'
 import PanelPagination from './PanelPagination.vue'
 import PanelPasswordForm from './PanelPasswordForm.vue'
+import ForwardingRuleForm from './ForwardingRuleForm.vue'
 import { formatCount } from './format'
-import type { ArchivePage } from './types'
+import type { ArchivePage, ForwardingRule } from './types'
 import { usePanelForm } from './usePanelForm'
 
 const props = defineProps<{ page: ArchivePage, refresh?: 'loading' | 'failed' }>()
-defineEmits<{ retry: [] }>()
+defineEmits<{ retry: [], ruleUpdated: [rule: ForwardingRule] }>()
 const router = useRouter()
 const passwordForm = usePanelForm()
 const recipient = ref(props.page.recipient)
@@ -44,6 +45,8 @@ function search() {
             <RouterLink v-if="page.recipient" class="text-action" to="/admin/archive">Сбросить</RouterLink>
         </div>
     </form>
+    <ForwardingRuleForm v-if="!page.user.is_admin && page.forwarding" :key="page.user.id" :rule="page.forwarding"
+        :server-time="page.serverTime" @updated="$emit('ruleUpdated', $event)" @refresh="$emit('retry')" />
     <section class="card mail-card">
         <div class="card-heading"><h2>Входящие</h2><span v-if="!refresh" class="count">{{ formatCount(page.messages.total) }}</span></div>
         <p v-if="refresh === 'loading'" role="status">Обновляем список писем…</p>

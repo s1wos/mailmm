@@ -1,11 +1,15 @@
 <?php
 
 use App\Http\Controllers\Api\EmailController;
+use App\Http\Controllers\Api\ForwardingFeedbackController;
 use App\Http\Controllers\Api\MessageController;
 use App\Http\Middleware\AddPanelUrl;
 use App\Http\Middleware\LimitRepeatedAction;
 use App\Http\Middleware\ThrottleOrdinaryUser;
+use Illuminate\Foundation\Http\Middleware\PreventRequestForgery;
 use Illuminate\Support\Facades\Route;
+
+Route::post('/forwarding/feedback', ForwardingFeedbackController::class)->withoutMiddleware(PreventRequestForgery::class);
 
 Route::get('/email', [EmailController::class, 'show'])->middleware(AddPanelUrl::class);
 Route::get('/email/options', [EmailController::class, 'options'])->middleware(LimitRepeatedAction::class.':options');

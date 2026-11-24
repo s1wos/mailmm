@@ -1,0 +1,25 @@
+services:
+  forward-filter:
+    hostname: ${MX_HOST:?Set the incoming MX hostname}
+    cpus: 0.60
+    mem_limit: 384m
+    memswap_limit: 512m
+    depends_on:
+      forward-antivirus:
+        condition: service_healthy
+
+  forward-antivirus:
+    cpus: 0.90
+    mem_limit: 1450m
+    memswap_limit: 2300m
+    environment:
+      CLAMD_CONF_ConcurrentDatabaseReload: "no"
+      CLAMD_CONF_MaxThreads: "2"
+      FRESHCLAM_CONF_TestDatabases: "no"
+      FRESHCLAM_CHECKS: "12"
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 15s
+      timeout: 5s
+      start_period: 4m
+      retries: 3

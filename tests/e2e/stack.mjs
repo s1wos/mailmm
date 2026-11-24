@@ -13,7 +13,8 @@ async function connectSmtp(address, options) {
 }
 
 export const test = base.extend({
-    stack: [async ({}, use) => {
+    forwardingEnabled: [false, { option: true, scope: 'worker' }],
+    stack: [async ({ forwardingEnabled }, use) => {
         const project = 'mailmm-e2e-' + randomBytes(8).toString('hex')
         const secret = () => randomBytes(32).toString('hex')
         const env = {
@@ -24,6 +25,13 @@ export const test = base.extend({
             APP_KEY: 'base64:' + randomBytes(32).toString('base64'),
             PG_ADMIN_PASSWORD: secret(), DB_PASSWORD: secret(), SMTP_LOOKUP_PASSWORD: secret(),
             REVERB_APP_KEY: secret(), REVERB_APP_SECRET: secret(),
+            FORWARD_MANUAL_ENABLED: String(forwardingEnabled), FORWARD_AUTO_ENABLED: String(forwardingEnabled),
+            ...(forwardingEnabled && {
+                APP_ENV: 'local', FORWARD_MANUAL_ENABLED_AT: '2000-01-01T00:00:00Z', FORWARD_AUTO_ENABLED_AT: '2000-01-01T00:00:00Z',
+                FORWARD_MANUAL_DSN: 'smtp://127.0.0.1:10252', FORWARD_AUTO_DSN: 'smtp://127.0.0.1:10253',
+                FORWARD_SERVICE_ADDRESS: 'service@out.test', FORWARD_BOUNCE_DOMAIN: 'bounce.test',
+                FORWARD_SCANNER_URL: 'http://forward-worker:10254/checkv2',
+            }),
         }
         const compose = (args, options) => execFileSync('docker', [
             'compose', '--env-file', '.env.example', '-f', 'docker-compose.yml', '-p', project, ...args,
@@ -38,6 +46,12 @@ export const test = base.extend({
                 expect(images).toContain(project + '-' + service + ':local')
             }
             compose(['up', '-d', '--build'], { stdio: 'inherit' })
+            if (forwardingEnabled) {
+                const script = '/tmp/forwarding-fixture.php'
+                compose(['cp', 'tests/e2e/forwarding-fixture.php', 'forward-worker:' + script])
+                for (const profile of ['manual', 'auto']) compose(['exec', '-T', '-d', 'forward-worker', 'php', script, profile])
+                compose(['exec', '-T', '-d', 'forward-worker', 'php', '-S', '0.0.0.0:10254', script])
+            }
             const url = 'http://' + compose(['port', 'nginx', '80']).trim()
             let smtp = await localSmtp()
             await expect.poll(() => fetch(url).then(r => r.status).catch(() => 0), { timeout: 30_000 }).toBe(200)
@@ -46,6 +60,8 @@ export const test = base.extend({
             })
             await use({
                 url, admin, compose, sql, mxHost: env.MX_HOST,
+                captures: profile => compose(['exec', '-T', 'forward-worker', 'cat', '/tmp/' + profile + '-capture.jsonl'])
+                    .trim().split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)),
                 get smtp() { return smtp },
                 async recreateSmtp(host, limit = '10485760') {
                     compose(['up', '-d', '--no-deps', '--force-recreate', 'smtp'], {

@@ -16,6 +16,7 @@ import TemporaryMailboxes from './TemporaryMailboxes.vue'
 import PanelIcon from './PanelIcon.vue'
 import PanelNav from './PanelNav.vue'
 import { PanelHttpError, panelRequest, setPanelUser } from './http'
+import { clearForwardDrafts } from './forwarding'
 import { panelLoginTarget, panelTabs } from './routes'
 import type { ErrorsPage, PanelPageData, PanelUser } from './types'
 
@@ -92,6 +93,7 @@ function resetAccount() {
 
 async function requireLogin() {
     const next = path.value
+    if (user.value) clearForwardDrafts(user.value.id)
     resetAccount()
     if (route.path === '/admin/login') await load()
     else await router.replace({ path: '/admin/login', query: { next } })
@@ -114,7 +116,11 @@ async function contentReady(focus = true) {
     await nextTick()
     if (target !== route.fullPath) return
     if (focus) {
-        if (route.hash) document.getElementById(route.hash.slice(1))?.scrollIntoView()
+        if (route.hash) {
+            const targetHeading = document.getElementById(route.hash.slice(1))
+            if (targetHeading?.id === 'auto-forwarding') targetHeading.focus({ preventScroll: true })
+            targetHeading?.scrollIntoView()
+        }
         else if (page.value?.screen === 'login') main.value?.querySelector<HTMLInputElement>('input')?.focus({ preventScroll: true })
         else main.value?.focus({ preventScroll: true })
     }
@@ -330,6 +336,7 @@ function checkExpiry() {
 
 async function accountChanged(account: PanelUser | null) {
     if (!account) return requireLogin()
+    if (user.value) clearForwardDrafts(user.value.id)
     resetAccount()
     if (path.value === '/admin') await load()
     else await router.replace('/admin')
@@ -365,6 +372,7 @@ async function logout() {
     try {
         const result = await panelRequest<{ redirect: string }>('/admin/logout', { method: 'POST', signal: lifetime.signal })
         if (lifetime.signal.aborted) return
+        if (user.value) clearForwardDrafts(user.value.id)
         notifyMailboxSessionChanged()
         resetAccount()
         await router.replace(result.redirect)
@@ -481,7 +489,8 @@ onBeforeUnmount(() => {
             <Login v-else-if="page?.screen === 'login'" :page="page" @authenticated="authenticated" />
             <Dashboard v-else-if="page?.screen === 'dashboard'" :page="page" />
             <Errors v-else-if="page?.screen === 'errors'" :page="page" :refresh-failed="errorRefreshFailed" />
-            <Archive v-else-if="page?.screen === 'archive'" :page="page" :refresh="listRefresh" @retry="refreshList" />
+            <Archive v-else-if="page?.screen === 'archive'" :page="page" :refresh="listRefresh" @retry="refreshList"
+                @rule-updated="page = { ...page, forwarding: $event }" />
             <Message v-else-if="page?.screen === 'message'" :page="page" />
             <Mailboxes v-else-if="page?.screen === 'mailboxes'" :key="mailboxFormKey" :page="page" :awaiting-page="changingQuery" @navigate="openReceipt"
                 @credentials-issued="page = { ...page, credentials: $event }" />

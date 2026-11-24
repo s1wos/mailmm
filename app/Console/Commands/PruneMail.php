@@ -30,6 +30,10 @@ class PruneMail extends Command
                         return;
                     }
                     $paths = array_column($message->attachments ?? [], 'path');
+                    if ($message->raw_path !== null) {
+                        $paths[] = $message->raw_path;
+                        $paths[] = $message->raw_path.'.writing';
+                    }
                     if ($paths && ! Storage::disk('local')->delete($paths)) {
                         throw new RuntimeException("Could not remove attachments of message {$row->id}.");
                     }

@@ -77,3 +77,56 @@ test('the overview shows UTC days, accessible daily counts, and the share delive
     assert.match(html, /Пользователи онлайн[\s\S]*?class="metric-value">17</)
     assert.match(html, /href="\/admin\/messages\/37\?from=overview"/)
 })
+
+test('owners and administrators can forward archive copies while the global switch still controls sending', async () => {
+    const page = {
+        user: owner, backUrl: '/admin',
+        letter: { ...letter, body_text: '', attachments: [], forwarding: { available: true, reason: null, content: 'original' } },
+        forwards: [{ id: 'f1', mode: 'manual', request_id: 'k1', status: 'accepted', destination: 'reader@example.test',
+            error_code: null, created_at: letter.received_at }],
+    }
+    const html = await render('Message', page, '/admin/messages/37')
+    assert.match(html, /<button\b[^>]*>\s*Переслать\s*<\/button>/)
+    assert.match(html, /Передано почтовому серверу/)
+    assert.match(html, /reader@example\.test/)
+    const legacy = await render('Message', { ...page, user: admin, letter: { ...page.letter,
+        forwarding: { available: true, reason: null, content: 'archive' } }, forwards: [] }, '/admin/messages/37')
+    assert.match(legacy, /<button\b[^>]*>\s*Переслать/)
+    const paused = await render('Message', { ...page, letter: { ...page.letter,
+        forwarding: { available: false, reason: 'mode_disabled', content: 'archive' } } }, '/admin/messages/37')
+    assert.match(paused, /Ручная пересылка выключена/)
+    assert.doesNotMatch(paused, /<button\b[^>]*>\s*Переслать/)
+})
+
+test('only the owner sees the pending rule, its destination and confirmation controls', async () => {
+    const page = {
+        user: owner, recipient: '', listQuery: {}, serverTime: '2026-11-20T00:00:00Z',
+        forwarding: { status: 'pending', sending_enabled: true, version: 7, destination: 'confirm@example.test', activated_at: null,
+            code_expires_at: '2026-11-20T00:10:00Z', resend_at: null, disabled_reason: null, last_error_code: null },
+        messages: { data: [], current_page: 1, last_page: 1, total: 0, prev_page_url: null, next_page_url: null },
+    }
+    const html = await render('Archive', page, '/admin')
+    assert.match(html, /Ожидает подтверждения/)
+    assert.match(html, /confirm@example\.test/)
+    assert.match(html, /autocomplete="one-time-code"/)
+    assert.match(html, /Выслать код снова/)
+    assert.match(html, /Отменить/)
+    assert.doesNotMatch(await render('Archive', { ...page, user: admin }, '/admin/archive'), /confirm@example\.test/)
+    const paused = await render('Archive', { ...page, forwarding: {
+        ...page.forwarding, sending_enabled: false, code_expires_at: null,
+    } }, '/admin#auto-forwarding')
+    assert.match(paused, /<h2\b(?=[^>]*id="auto-forwarding")(?=[^>]*tabindex="-1")/)
+    assert.match(paused, /Адрес сохранён/)
+    assert.doesNotMatch(paused, /autocomplete="one-time-code"|Выслать код снова|>Получить код</)
+    assert.match(paused, /Изменить адрес/)
+    assert.match(paused, /Отменить/)
+    const ready = await render('Archive', { ...page, forwarding: { ...page.forwarding, code_expires_at: null } }, '/admin')
+    assert.match(ready, /Получить код/)
+    assert.doesNotMatch(ready, /autocomplete="one-time-code"/)
+    const activePaused = await render('Archive', { ...page, forwarding: {
+        ...page.forwarding, status: 'active', sending_enabled: false,
+    } }, '/admin')
+    assert.match(activePaused, /Отправка приостановлена/)
+    assert.doesNotMatch(activePaused, /Включена/)
+    assert.match(activePaused, /Выключить/)
+})

@@ -29,13 +29,26 @@ class Message extends Model
         'body_html',
         'received_at',
         'attachments',
+        'raw_path',
+        'raw_size',
+        'raw_sha256',
+        'forwarding_context',
     ];
+
+    protected $hidden = ['raw_path', 'raw_size', 'raw_sha256', 'forwarding_context'];
 
     protected $casts = [
         'received_at' => 'datetime',
         'attachments' => 'array',
         'is_pending' => 'boolean',
+        'raw_size' => 'integer',
+        'forwarding_context' => 'array',
     ];
+
+    public function hasOriginal(): bool
+    {
+        return ! $this->is_pending && $this->raw_path !== null && $this->raw_size > 0 && $this->raw_sha256 !== null;
+    }
 
     public function scopeRetained(Builder $query): Builder
     {

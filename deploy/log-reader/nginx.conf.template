@@ -30,7 +30,7 @@ http {
         location = /containers {
             proxy_pass http://engine/containers/json?all=1&filters=%7B%22label%22%3A%5B%22com.docker.compose.project%3D${MAILMM_PROJECT}%22%5D%7D;
         }
-        location ~ ^/logs/(?<service>app|worker|scheduler|reverb|migrate|smtp|nginx)/(?<replica>[1-9][0-9]*)$ {
+        location ~ ^/logs/(?<service>app|worker|forward-worker|scheduler|reverb|migrate|smtp|nginx)/(?<replica>[1-9][0-9]*)$ {
             if ($log_window = "") { return 400; }
             proxy_pass http://engine/containers/${MAILMM_PROJECT}-$service-$replica/logs?stdout=1&stderr=1&timestamps=1&$log_window;
         }

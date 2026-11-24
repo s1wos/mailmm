@@ -39,14 +39,19 @@ chgrp www-data bootstrap/cache/config.php
 chmod 0640 bootstrap/cache/config.php
 umask 0022
 
+virtual_domains="proxy:pgsql:$domain_map"
+if [ -n "${FORWARD_BOUNCE_DOMAIN:-}" ]; then
+    case "$FORWARD_BOUNCE_DOMAIN" in *[!a-zA-Z0-9.-]*) echo "Invalid bounce domain" >&2; exit 1;; esac
+    virtual_domains="$virtual_domains, $FORWARD_BOUNCE_DOMAIN"
+fi
 postconf -e "myhostname = $MX_HOST" "mydestination =" "relay_domains =" \
-    "virtual_mailbox_domains = proxy:pgsql:$domain_map" "virtual_mailbox_maps = static:1" \
+    "virtual_mailbox_domains = $virtual_domains" "virtual_mailbox_maps = static:1" \
     "virtual_transport = mailmm" "mailmm_destination_recipient_limit = 1" "enable_long_queue_ids = yes" \
     "smtpd_relay_restrictions = reject_unauth_destination" \
     "message_size_limit = $message_size_limit" \
     "inet_interfaces = all" "maillog_file = /dev/stdout" "smtpd_tls_security_level = none"
 postconf -P 'smtp/inet/max_use=1'
-postconf -M 'mailmm/unix=mailmm unix - n n - - pipe flags=q user=www-data argv=/usr/local/bin/php /var/www/artisan mail:parse --postfix --recipient=${recipient}'
+postconf -M 'mailmm/unix=mailmm unix - n n - - pipe flags=q null_sender=<> user=www-data argv=/usr/local/bin/php /var/www/artisan mail:parse --postfix --recipient=${recipient} --mail-from=${sender} --client-ip=${client_address} --helo=${client_helo}'
 if [ -r /etc/letsencrypt/live/mailmm/fullchain.pem ]; then
     postconf -e 'smtpd_tls_security_level = may' \
         'smtpd_tls_cert_file = /etc/letsencrypt/live/mailmm/fullchain.pem' \

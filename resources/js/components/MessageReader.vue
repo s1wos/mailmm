@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ArrowLeft, Download, Paperclip } from '@lucide/vue'
+import { ArrowLeft, Download, Forward, Paperclip } from '@lucide/vue'
+import { RouterLink } from 'vue-router'
 import type { EmailMessage, MessageSummary } from '../model/types'
 import MailboxWarning from './MailboxWarning.vue'
 import { useEmailStore } from '../stores/emailStore'
@@ -44,5 +45,14 @@ function fileSize(size: number) {
                 </li>
             </ul>
         </div>
+        <RouterLink v-if="message?.forwarding?.available" class="text-btn forward-link" :to="'/admin/messages/' + message.id + '#forward'">
+            <Forward aria-hidden="true" /> Переслать
+        </RouterLink>
+        <p v-else-if="message?.forwarding?.reason === 'mode_disabled'" class="forward-hint">Ручная пересылка выключена.</p>
     </article>
 </template>
+
+<style scoped>
+.forward-link { margin-top: 1rem; min-height: 44px; }
+.forward-hint { margin-top: 1rem; color: var(--mm-muted); font-size: .875rem; }
+</style>

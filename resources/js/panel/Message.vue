@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { RouterLink, useRouter } from 'vue-router'
 import PanelIcon from './PanelIcon.vue'
+import MessageForwarding from './MessageForwarding.vue'
 import { formatTimestamp } from './format'
 import type { MessagePage } from './types'
 import { useActionGuard } from '../useActionGuard'
@@ -44,5 +45,8 @@ function returnToList(event: MouseEvent) {
                 </li>
             </ul>
         </template>
+        <MessageForwarding v-if="page.letter.forwarding" :key="page.user.id + '-' + page.letter.id"
+            :user-id="page.user.id" :message-id="page.letter.id" :availability="page.letter.forwarding"
+            :initial-forwards="page.forwards" />
     </article>
 </template>

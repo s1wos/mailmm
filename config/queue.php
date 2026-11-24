@@ -9,6 +9,15 @@ return [
             'driver' => 'sync',
         ],
 
+        'forwarding' => [
+            'driver' => 'database',
+            'connection' => null,
+            'table' => env('DB_QUEUE_TABLE', 'jobs'),
+            'queue' => 'forwarding',
+            'retry_after' => 120,
+            'after_commit' => false,
+        ],
+
         'database' => [
             'driver' => 'database',
             'connection' => env('DB_QUEUE_CONNECTION'),

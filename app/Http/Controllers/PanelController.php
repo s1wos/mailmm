@@ -10,14 +10,18 @@ use App\Http\Requests\PanelMailboxesRequest;
 use App\Http\Requests\PanelMessageRequest;
 use App\Http\Responses\PanelResponse;
 use App\Models\Email;
+use App\Models\MailForward;
 use App\Models\Message;
 use App\Models\User;
 use App\Services\AttachmentDownload;
 use App\Services\EmailGeneratorService;
+use App\Services\ForwardingRequests;
+use App\Services\ForwardingRules;
 use App\Services\MailboxDomainCatalog;
 use App\Services\MailboxIssuance;
 use App\Services\MailboxNotifications;
 use App\Services\MailDashboard;
+use App\Services\PanelMessages;
 use App\Services\SitePresence;
 use Illuminate\Contracts\View\View;
 use Illuminate\Database\Eloquent\Builder;
@@ -64,7 +68,7 @@ class PanelController extends Controller
     {
         $user = $request->user();
         $recipient = $request->validated('recipient') ?? '';
-        $query = $this->messages($user);
+        $query = PanelMessages::for($user);
         $listQuery = [];
         if ($user->is_admin && $recipient !== '') {
             $query->where('recipient', Str::lower($recipient));
@@ -87,6 +91,7 @@ class PanelController extends Controller
             'messages' => $this->page($messages),
             'recipient' => $recipient,
             'listQuery' => (object) $listQuery,
+            'forwarding' => ForwardingRules::forPanel($user),
         ];
     }
 
@@ -203,6 +208,8 @@ class PanelController extends Controller
         $direct = $request->wantsJson() && $request->boolean('return_credentials');
         $ticket = DB::transaction(function () use ($request, $email, $password, $direct) {
             $owner = User::where('is_admin', false)->lockForUpdate()->findOrFail($email->owner_user_id);
+            $lockedEmail = $owner->mailbox()->activePermanent()->lockForUpdate()->findOrFail($email->id);
+            ForwardingRequests::revokeMailbox($lockedEmail, $owner->id, 'password_reset');
             $owner->password = $password;
             $owner->setRememberToken(Str::random(60));
             $owner->save();
@@ -225,7 +232,7 @@ class PanelController extends Controller
     public function show(PanelMessageRequest $request, int $message): View|JsonResponse
     {
         $user = $request->user();
-        $letter = $this->messages($user)->findOrFail($message, $request->wantsJson() ? ['*'] : ['id']);
+        $letter = PanelMessages::for($user)->findOrFail($message, $request->wantsJson() ? ['*'] : ['id']);
 
         return PanelResponse::screen($request, 'message', fn () => $this->messageData($request, $letter));
     }
@@ -253,23 +260,16 @@ class PanelController extends Controller
             'letter' => $letter->panelSummary() + [
                 'body_text' => $letter->readableBody(),
                 'attachments' => $attachments,
+                'forwarding' => ForwardingRequests::availability($letter),
             ],
+            'forwards' => MailForward::where('message_id', $letter->id)->visibleTo($request->user())
+                ->latest()->latest('id')->limit(10)->get()->map(fn (MailForward $forward) => $forward->panelData()),
             'backUrl' => route($activeSection, $parameters, false),
         ];
     }
 
     public function attachment(Request $request, int $message, int $index, AttachmentDownload $download): Response
     {
-        return $download->forMessage($request, $this->messages($request->user())->findOrFail($message), $index);
-    }
-
-    private function messages(User $user): Builder
-    {
-        $query = Message::retained();
-        if (! $user->is_admin) {
-            $query->whereIn('email_id', $user->mailbox()->active()->select('id'));
-        }
-
-        return $query;
+        return $download->forMessage($request, PanelMessages::for($request->user())->findOrFail($message), $index);
     }
 }

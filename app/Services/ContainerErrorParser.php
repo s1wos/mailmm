@@ -11,7 +11,7 @@ class ContainerErrorParser
         $match = match ($service) {
             'nginx' => self::nginx($line),
             'smtp' => self::postfix($line) ?? self::php($line),
-            'app', 'reverb', 'worker', 'scheduler', 'migrate' => self::php($line),
+            'app', 'reverb', 'worker', 'forward-worker', 'scheduler', 'migrate' => self::php($line),
             default => null,
         };
         if ($match === null) {

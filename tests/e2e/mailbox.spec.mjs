@@ -447,6 +447,41 @@ test('a permanent mailbox owner is limited and their open letter disappears afte
         await check.click()
         await expect(check).toContainText('Проверено')
         await check.evaluate(el => el.click())
+test('a permanent mailbox owner can save and cancel a forwarding address while sending is paused', async ({ browser, page, stack }) => {
+    await login(page, stack.url, stack.admin)
+    await page.goto(stack.url + '/admin/mailboxes')
+    await page.getByLabel('Имя до @').fill('paused-forward-owner')
+    await page.getByRole('button', { name: 'Создать ящик' }).click()
+    const credentials = page.locator('.credentials code')
+    await expect(credentials).toHaveCount(2)
+    const [email, password] = await credentials.allTextContents()
+    const owner = await browser.newPage()
+    try {
+        await login(owner, stack.url, { email, password })
+        await openRealtimeMailbox(owner, stack.url)
+        await owner.getByRole('link', { name: 'Автопересылка' }).click()
+        const rule = owner.getByRole('region', { name: 'Автопересылка' })
+        await rule.getByRole('button', { name: 'Настроить' }).click()
+        const destination = 'paused-owner@reader.test'
+        await rule.getByLabel('Адрес назначения').fill(destination)
+        await rule.getByLabel('Текущий пароль').fill(password)
+        await rule.getByRole('button', { name: 'Сохранить адрес' }).click()
+        await expect(rule.getByText('Адрес сохранён', { exact: true })).toBeVisible()
+
+        await owner.reload()
+        await expect(rule.getByRole('status').filter({ hasText: destination })).toContainText('Адрес сохранён')
+        await expect(rule.getByText(/Когда отправка станет доступна, запросите код/)).toBeVisible()
+        await expect(rule.getByLabel('Код из письма')).toHaveCount(0)
+        await expect(rule.getByRole('button', { name: 'Получить код' })).toHaveCount(0)
+        await rule.getByRole('button', { name: 'Отменить' }).click()
+        await expect(rule.getByText('Выключена', { exact: true })).toBeVisible()
+        await owner.reload()
+        await expect(rule.getByRole('button', { name: 'Настроить' })).toBeVisible()
+    } finally {
+        await owner.close()
+    }
+})
+
         expect(trace.sent.filter(frame => frame.reason === 'manual')).toHaveLength(1)
         trace.http.length = 0
         const box = page.locator('.box-list li').filter({ hasText: email })
@@ -1509,7 +1544,7 @@ test('a permanent mailbox owner can choose a password and sign in again', async 
     await page.getByLabel('Новый пароль', { exact: true }).fill(chosen)
     await page.getByLabel('Повторите новый пароль').fill(chosen)
     await page.getByRole('button', { name: 'Изменить пароль' }).click()
-    await expect(page.getByRole('status')).toContainText('Пароль ящика изменён.')
+    await expect(page.locator('.owner-password').getByRole('status')).toHaveText('Пароль ящика изменён.')
 
     await page.getByRole('button', { name: 'Выйти' }).first().click()
     await expect(page.getByLabel('Электронная почта')).toBeVisible()

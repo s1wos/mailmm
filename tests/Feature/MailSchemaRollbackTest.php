@@ -33,6 +33,7 @@ class MailSchemaRollbackTest extends TestCase
     public static function incompatibleRollbacks(): array
     {
         return [
+            'saved MIME original' => ['migrate:rollback', [], ['raw_path' => 'mail/ab/archived.eml']],
             'archived mail in the latest batch' => ['migrate:rollback', [], ['email_id' => null]],
             'pending mail in an explicit batch' => ['migrate:rollback', ['--batch' => 2], ['is_pending' => true]],
             'reset across both batches' => ['migrate:reset', [], ['email_id' => null]],

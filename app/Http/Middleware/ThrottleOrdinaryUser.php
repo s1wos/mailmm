@@ -11,6 +11,7 @@ class ThrottleOrdinaryUser extends ThrottleRequests
         'login' => 'panel-login:',
         'close' => 'mailbox-close:',
         'password' => 'mailbox-password:',
+        'forwarding-password' => 'mailbox-forwarding-password:',
     ];
 
     public function handle($request, Closure $next, $maxAttempts = 60, $decayMinutes = 1, $prefix = '')

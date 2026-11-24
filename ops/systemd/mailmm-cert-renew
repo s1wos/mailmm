@@ -24,7 +24,10 @@ if [ -f "$state/nginx.pending" ]; then
     fi
 fi
 if [ -f "$state/postfix.pending" ]; then
-    if compose exec -T smtp postfix reload; then
+    if compose exec -T smtp postfix reload && {
+        outbound=$(docker ps -aq --filter label=com.docker.compose.project=mailmm --filter label=com.docker.compose.service=outbound) &&
+        { [ -z "$outbound" ] || docker exec "$outbound" postfix reload; }
+    }; then
         rm "$state/postfix.pending"
     else
         echo 'MailMM certificate reload failed for postfix. A retry is pending.' >&2

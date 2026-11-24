@@ -13,6 +13,7 @@ The service is live at **[mailmm.my](https://mailmm.my/)**.
 - 🔄 Switch to a new address when you no longer need the old inbox
 - 🎨 Responsive inbox built with Vue 3
 - 🔑 Create permanent mailboxes and manage domains from the admin panel
+- 📨 Forward an archived message or automatically redirect new mail from a permanent mailbox. [Forwarding setup](docs/mail-forwarding.md)
 - 🐳 Dockerized deployment on Ubuntu
 
 ---
@@ -67,7 +68,7 @@ Open the [local inbox](http://localhost:8080/). To test mail delivery, send a me
 - [x] PostgreSQL integration
 - [x] Dockerized deployment
 - [x] Custom domain support
-- [ ] Email forwarding
+- [x] Email forwarding
 
 ## License
 
