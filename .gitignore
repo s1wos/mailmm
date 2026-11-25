@@ -18,14 +18,7 @@ CLAUDE.md
 /.agents/
 /.claude/
 /audit-context/
-/docs/instructions/
-/docs/mail-forwarding.md
-/docs/mailmm-my-forwarding-dns.txt
-/docs/release-mailmm-my-inbox.jpg
-/docs/release-mailmm-my.md
-/docs/code-review-*.md
-/docs/reviews/
-/docs/superpowers/
+/docs/
 /auth.json
 /node_modules
 /test-results
