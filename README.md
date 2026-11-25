@@ -13,7 +13,7 @@ The service is live at **[mailmm.my](https://mailmm.my/)**.
 - 🔄 Switch to a new address when you no longer need the old inbox
 - 🎨 Responsive inbox built with Vue 3
 - 🔑 Create permanent mailboxes and manage domains from the admin panel
-- 📨 Forward an archived message or automatically redirect new mail from a permanent mailbox. [Forwarding setup](docs/mail-forwarding.md)
+- 📨 Forward an archived message or automatically redirect new mail from a permanent mailbox
 - 🐳 Dockerized deployment on Ubuntu
 
 ---
