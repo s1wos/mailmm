@@ -41,8 +41,12 @@ umask 0022
 
 virtual_domains="proxy:pgsql:$domain_map"
 if [ -n "${FORWARD_BOUNCE_DOMAIN:-}" ]; then
-    case "$FORWARD_BOUNCE_DOMAIN" in *[!a-zA-Z0-9.-]*) echo "Invalid bounce domain" >&2; exit 1;; esac
-    virtual_domains="$virtual_domains, $FORWARD_BOUNCE_DOMAIN"
+    bounce_domain=$(php -r 'require "vendor/autoload.php"; echo App\Rules\MailboxDomainName::parse((string) getenv("FORWARD_BOUNCE_DOMAIN"));')
+    if [ -z "$bounce_domain" ]; then
+        echo "Invalid FORWARD_BOUNCE_DOMAIN" >&2
+        exit 1
+    fi
+    virtual_domains="$virtual_domains, $bounce_domain"
 fi
 postconf -e "myhostname = $MX_HOST" "mydestination =" "relay_domains =" \
     "virtual_mailbox_domains = $virtual_domains" "virtual_mailbox_maps = static:1" \

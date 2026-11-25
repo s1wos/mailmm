@@ -17,7 +17,7 @@ class MailboxPageRequest extends FormRequest
 
     public function rules(): array
     {
-        return ['cursor' => ['sometimes', 'required', 'string']];
+        return ['cursor' => $this->hasHeader('X-Inbox-Until') ? ['required', 'string'] : ['sometimes', 'required', 'string']];
     }
 
     public function after(): array
@@ -26,7 +26,8 @@ class MailboxPageRequest extends FormRequest
             $encoded = $validator->getData()['cursor'] ?? null;
             if ($encoded !== null && $validator->errors()->isEmpty()) {
                 $cursor = Cursor::fromEncoded($encoded);
-                $validator->errors()->merge(ValidatorFactory::make($cursor?->toArray() ?? [], MailboxCursor::rules())->errors());
+                $rules = MailboxCursor::rules($this->hasHeader('X-Inbox-Until'));
+                $validator->errors()->merge(ValidatorFactory::make($cursor?->toArray() ?? [], $rules)->errors());
             }
         }];
     }

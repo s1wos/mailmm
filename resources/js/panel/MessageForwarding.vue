@@ -31,6 +31,7 @@ const trigger = ref<HTMLButtonElement>()
 const lifetime = new AbortController()
 let timer: ReturnType<typeof setTimeout> | undefined
 let polling = false
+let fastPollUntil = 0
 
 function setDraft(value: typeof draft.value) {
     draft.value = value
@@ -78,7 +79,8 @@ async function send() {
         setDraft(null)
         forwards.value = [forward, ...forwards.value.filter(item => item.id !== forward.id)].slice(0, 10)
         await close()
-        schedulePoll()
+        fastPollUntil = Date.now() + 2_000
+        void refreshStatuses()
     } catch (cause) {
         if (lifetime.signal.aborted || accessLost(cause)) return
         if (cause instanceof PanelHttpError && cause.status < 500) {
@@ -97,22 +99,27 @@ function pendingOperations() {
 function schedulePoll() {
     clearTimeout(timer)
     if (!lifetime.signal.aborted && !denied.value && !globalThis.document?.hidden && pendingOperations().length) {
-        timer = setTimeout(refreshStatuses, 5_000)
+        timer = setTimeout(refreshStatuses, Date.now() < fastPollUntil ? 500 : 5_000)
     }
 }
 async function refreshStatuses() {
     if (polling || denied.value || globalThis.document?.hidden || lifetime.signal.aborted) return
+    clearTimeout(timer)
+    const ids = new Set(pendingOperations().slice(0, 10).map(item => item.id))
+    if (!ids.size) return
+    const query = new URLSearchParams()
+    for (const id of ids) query.append('ids[]', id)
     polling = true
     pollError.value = ''
     try {
-        for (const item of pendingOperations()) {
-            const { forward } = await panelRequest<{ forward: MailForward }>(path + '/' + item.id, {
-                headers: { 'X-Panel-User': String(props.userId) },
-                signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(15_000)]),
-            })
-            if (lifetime.signal.aborted || denied.value) return
-            forwards.value = forwards.value.map(previous => previous.id === forward.id ? forward : previous)
-        }
+        const result = await panelRequest<{ forwards: MailForward[] }>(path + '?' + query, {
+            headers: { 'X-Panel-User': String(props.userId) },
+            signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(15_000)]),
+        })
+        if (lifetime.signal.aborted || denied.value) return
+        const updated = new Map(result.forwards.map(item => [item.id, item]))
+        forwards.value = forwards.value.filter(item => !ids.has(item.id) || updated.has(item.id))
+            .map(item => updated.get(item.id) ?? item)
     } catch (cause) {
         if (!lifetime.signal.aborted && !accessLost(cause)) pollError.value = 'Не удалось обновить статус. Проверим ещё раз.'
     } finally {
@@ -154,9 +161,8 @@ onBeforeUnmount(() => {
                         <input id="forward" ref="input" v-model="to" name="to" type="text" inputmode="email" required maxlength="254" autocomplete="off" autocapitalize="none" spellcheck="false"
                             :readonly="pending || !!draft" aria-describedby="forward-contents">
                         <p id="forward-contents" class="hint">
-                            В поле «От кого» получатель увидит адрес исходного отправителя.
-                            <template v-if="availability.content === 'archive'">Если его адрес не сохранился, отправителем будет указан MailMM. Перешлём текст письма и сохранённые вложения. Оформление сохраним, если в архиве есть HTML-версия.</template>
-                            <template v-else>Перешлём письмо с его оформлением, изображениями и вложениями.</template>
+                            <template v-if="availability.content === 'archive'">Перешлём текст письма и сохранённые вложения с адреса MailMM. Если адрес автора сохранился, получатель увидит его в письме и сможет ответить автору. Оформление сохраним, если в архиве есть HTML-версия.</template>
+                            <template v-else>В поле «От кого» получатель увидит адрес исходного отправителя. Перешлём письмо с его оформлением, изображениями и вложениями. Если оригинал недоступен, копия придёт с адреса MailMM.</template>
                         </p>
                     </div>
                     <div class="forward-actions">

@@ -1,3 +1,4 @@
+import { randomBytes, randomUUID } from 'node:crypto'
 import { expect } from '@playwright/test'
 import { openRealtimeMailbox, test } from './stack.mjs'
 
@@ -8,7 +9,7 @@ async function signIn(page, url, email, password) {
     await page.getByLabel('Электронная почта').fill(email)
     await page.getByLabel('Пароль').fill(password)
     await page.getByRole('button', { name: 'Войти' }).click()
-    await expect(page.getByRole('link', { name: 'Открыть почту' }).first()).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Открыть почту' }).first()).toBeVisible({ timeout: 15_000 })
 }
 
 test('a verified rule and a manual share deliver the original HTML and files to one chosen recipient', async ({ page, browser, stack }) => {
@@ -63,6 +64,7 @@ test('a verified rule and a manual share deliver the original HTML and files to 
         await owner.getByRole('button', { name: new RegExp(subject) }).click()
         await owner.getByRole('link', { name: 'Переслать' }).click()
         await expect(owner.getByLabel('Кому')).toBeFocused()
+        await expect(owner.getByLabel('Кому')).toHaveCSS('outline-style', 'none')
         await owner.setViewportSize({ width: 320, height: 740 })
         expect(await owner.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
         await owner.getByLabel('Кому').fill(manual)
@@ -112,10 +114,88 @@ test('a message archived before originals were saved can be forwarded with its t
     await expect(page.getByText(/текст письма и сохранённые вложения/)).toBeVisible()
     await page.getByLabel('Кому').fill(destination)
     await page.getByRole('button', { name: 'Отправить' }).click()
-    const captures = () => stack.captures('auto').filter(mail => mail.envelope_to.includes(destination))
+    const captures = () => stack.captures('manual').filter(mail => mail.envelope_to.includes(destination))
     await expect.poll(() => captures().length, { timeout: 25_000 }).toBe(1)
     const [mail] = captures()
-    expect(mail).toMatchObject({ envelope_to: [destination], from: 'shop@archive.test', to: destination, reply_to: null, subject })
+    expect(mail).toMatchObject({ envelope_to: [destination], from: 'service@out.test', to: destination, reply_to: 'shop@archive.test', subject })
+    expect(mail.text).toContain('shop@archive.test')
     expect(mail.text).toContain('Saved invoice text')
     expect(mail.files).toEqual({ 'invoice.bin': { bytes: bytes.toString('base64'), cid: '' } })
+})
+
+test('PostgreSQL admits only one of two users competing for the last hourly forwarding slot', async ({ page, browser, stack }) => {
+    test.setTimeout(90_000)
+    const other = { email: 'quota-admin@e2e.test', password: randomBytes(24).toString('hex') }
+    stack.compose(['exec', '-T', 'app', 'php', 'artisan', 'mail:admin', other.email], {
+        input: other.password + '\n' + other.password + '\n',
+    })
+    const context = await browser.newContext()
+    try {
+        const otherPage = await context.newPage()
+        await signIn(page, stack.url, stack.admin.email, stack.admin.password)
+        await signIn(otherPage, stack.url, other.email, other.password)
+        const token = async actor => {
+            const cookie = (await actor.context().cookies(stack.url)).find(item => item.name === 'XSRF-TOKEN')
+            expect(cookie).toBeDefined()
+            return decodeURIComponent(cookie.value)
+        }
+        const tokens = await Promise.all([token(page), token(otherPage)])
+        const sql = query => stack.sql(query, ['-Atq']).trim()
+        const letters = sql(`INSERT INTO messages (recipient, "from", subject, received_at) VALUES
+            ('first@mailmm.test', 'author@archive.test', 'First quota letter', now()),
+            ('second@mailmm.test', 'author@archive.test', 'Second quota letter', now()) RETURNING id`).split(/\r?\n/)
+        const limit = Number(stack.compose(['exec', '-T', 'app', 'printenv', 'FORWARD_TOTAL']))
+        expect(limit).toBeGreaterThan(1)
+        const marker = 'forward-quota-' + randomUUID()
+        const holder = `SELECT pid FROM pg_stat_activity WHERE application_name = '${marker}'`
+        const send = (actor, index) => actor.request.post(`${stack.url}/admin/messages/${letters[index]}/forwards`, {
+            headers: { Accept: 'application/json', 'X-XSRF-TOKEN': tokens[index] },
+            data: { to: `quota-${index}@reader.test`, request_id: randomUUID() },
+            timeout: 25_000,
+        })
+
+        stack.compose(['pause', 'forward-worker'])
+        try {
+            // Keep the whole contention test in one UTC quota window.
+            await expect.poll(() => sql("SELECT date_trunc('hour', now()) + interval '1 hour' > now() + interval '20 seconds'"),
+                { timeout: 25_000 }).toBe('t')
+            const hour = sql("SELECT extract(epoch FROM date_trunc('hour', now()))::bigint")
+            sql(`INSERT INTO forwarding_quota_buckets (hour, scope, used) VALUES (${hour}, 'total', ${limit - 1})
+                ON CONFLICT (hour, scope) DO UPDATE SET used = excluded.used`)
+
+            let requests, contentionError
+            try {
+                stack.compose(['exec', '-d', '-T', '-e', 'PGAPPNAME=' + marker, 'db', 'psql', '-U', 'postgres', '-d', 'mailmm',
+                    '-v', 'ON_ERROR_STOP=1', '-c', `BEGIN; SELECT 1 FROM forwarding_quota_buckets
+                        WHERE hour = ${hour} AND scope = 'total' FOR UPDATE; SELECT pg_sleep(40); ROLLBACK;`])
+                await expect.poll(() => sql(`SELECT EXISTS (SELECT FROM pg_stat_activity WHERE pid IN (${holder}) AND wait_event = 'PgSleep')`)).toBe('t')
+                requests = Promise.allSettled([send(page, 0), send(otherPage, 1)])
+                await expect.poll(() => sql(`SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'
+                    AND query LIKE '%forwarding_quota_buckets%' AND pid NOT IN (${holder})`), { timeout: 12_000 })
+                    .toBe('2').catch(error => { contentionError = error })
+            } finally {
+                sql(`SELECT pg_terminate_backend(pid) FROM (${holder}) AS holder`)
+                await requests
+            }
+
+            const responses = (await requests).map(result => {
+                if (result.status === 'rejected') throw result.reason
+                return result.value
+            })
+            expect(responses.map(response => response.status()).sort()).toEqual([202, 429])
+            if (contentionError) throw contentionError
+            const accepted = await responses.find(response => response.status() === 202).json()
+            const rejected = responses.find(response => response.status() === 429)
+            expect(await rejected.json()).toMatchObject({ code: 'quota_exceeded' })
+            expect(accepted.forward.status).toBe('queued')
+            expect(sql(`SELECT count(*) FROM mail_forwards WHERE message_id IN (${letters.join(',')}) AND status = 'queued'`)).toBe('1')
+            expect(sql(`SELECT count(*) FROM jobs WHERE queue = 'forwarding'
+                AND payload::jsonb->>'displayName' = 'App\\Jobs\\SendMailForward:${accepted.forward.id}'`)).toBe('1')
+            expect(sql(`SELECT used FROM forwarding_quota_buckets WHERE hour = ${hour} AND scope = 'total'`)).toBe(String(limit))
+        } finally {
+            stack.compose(['unpause', 'forward-worker'])
+        }
+    } finally {
+        await context.close()
+    }
 })

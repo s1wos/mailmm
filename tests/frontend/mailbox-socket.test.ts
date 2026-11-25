@@ -47,6 +47,58 @@ test('a changed socket snapshot refreshes expanded pages atomically without HTTP
     assert.deepEqual(calls, [])
 })
 
+test('an expanded inbox merges a backdated socket delta with one check and keeps its cursor and selection', async t => {
+    setActivePinia(createPinia())
+    const store = useEmailStore()
+    const row = (id: number, at: number) => ({
+        id, from: 'sender', subject: String(id), received_at: new Date(Date.UTC(2026, 0, 1, 0, 0, at)).toISOString(),
+        expires_at: '2099-11-20T00:00:00Z', has_attachments: false,
+    })
+    const rows = Array.from({ length: 330 }, (_, i) => row(330 - i, (330 - i) * 2))
+    const calls: string[] = []
+    t.mock.method(globalThis, 'fetch', (url: string) => {
+        calls.push(url)
+        if (url === '/api/email') return Response.json({ data: { id: 1, email: 'guest@example.test', expires_at: null } },
+            { headers: { 'X-Inbox-Snapshot': 'old' } })
+        if (url === '/api/messages/173') return Response.json({ data: { ...rows[157], body_text: 'Opened', attachments: [] } },
+            { headers: { 'X-Mailbox-Id': '1' } })
+        const start = Number(new URL(url, 'http://example.test').searchParams.get('cursor') ?? 0)
+        return Response.json({ data: rows.slice(start, start + 30), meta: { next_cursor: String(start + 30) } },
+            { headers: { 'X-Mailbox-Id': '1' } })
+    })
+    await store.refresh()
+    for (let page = 1; page < 10; page++) await store.loadMore()
+    await store.openMessage(173)
+    assert.equal(store.messages.length, 300)
+    const callsBefore = calls.length
+    let checks = 0
+    let pages = 0
+    const late = row(331, 347)
+    const belowBoundary = row(332, 61)
+    assert.equal(await store.checkSocket({
+        active: true,
+        mailboxId: 1,
+        async check(snapshot, _reason, _deliveryId, delta) {
+            checks++
+            assert.equal(snapshot, 'old')
+            assert.equal(delta, true)
+            return {
+                requestId: 'test', mailboxId: 1, snapshot: 'new', unchanged: false, grantExpiresAt: '2099-01-01T00:00:00Z',
+                serverTime: '2026-01-01T00:11:00Z', page: { data: [late, belowBoundary], meta: { next_cursor: null, delta: true } },
+            }
+        },
+        async page() { pages++; throw new Error('unexpected continuation') },
+    }, 'auto', late.id), true)
+    assert.equal(checks, 1)
+    assert.equal(pages, 0)
+    assert.equal(calls.length, callsBefore)
+    assert.deepEqual(store.messages.slice(156, 160).map(row => row.id), [174, 331, 173, 172])
+    assert.equal(store.messages.length, 301)
+    assert.equal(store.messages.at(-1)?.id, 31)
+    assert.equal(store.nextCursor, '300')
+    assert.equal(store.detail?.body_text, 'Opened')
+})
+
 test('socket commands match only their own response, including a split Unicode payload', async () => {
     const frames: { event: string, data: Record<string, unknown> }[] = []
     const socket = new MailboxSocket(5, (event, data) => { frames.push({ event, data }); return true })

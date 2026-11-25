@@ -88,6 +88,17 @@ class PanelTest extends TestCase
         $this->patch($url.'/'.$domain->id, ['issuance_enabled' => 1])->assertRedirect('/admin/settings')->assertSessionHas('status');
     }
 
+    public function test_admin_cannot_register_the_configured_bounce_domain_for_mailboxes(): void
+    {
+        config(['forwarding.bounce_domain' => 'bounce.test']);
+        $this->actingAs(User::factory()->create(['is_admin' => true]));
+
+        $this->postJson('/admin/settings/domains', ['name' => ' Bounce.TEST. '])
+            ->assertUnprocessable()->assertJsonValidationErrors('name');
+
+        $this->assertDatabaseMissing('mailbox_domains', ['name' => 'bounce.test']);
+    }
+
     public function test_panel_read_validation_applies_only_to_the_requested_screen_data(): void
     {
         $this->actingAs(User::factory()->create(['is_admin' => true]));
@@ -399,13 +410,110 @@ class PanelTest extends TestCase
         Message::create(['recipient' => 'other@example.test', 'from' => 'other@example.test', 'received_at' => $oldest->copy()->subSecond()]);
         $box->messages()->create($message + ['received_at' => $oldest->copy()->subSeconds(2), 'is_pending' => true]);
         $filtered = route('panel.archive', ['recipient' => $owner->email], false);
-        $this->actingAs(User::factory()->create(['is_admin' => true]))->getJson($filtered)
+        $admin = User::factory()->create(['is_admin' => true]);
+        $first = $this->actingAs($admin)->getJson($filtered)
             ->assertJsonCount(25, 'messages.data')->assertJsonPath('messages.total', 26)
             ->assertJsonPath('nextExpiryAt', now()->addMinute()->toISOString());
+        $next = $first->json('messages.next_page_url');
+        $this->getJson($next)->assertJsonCount(1, 'messages.data')->assertJsonPath('messages.total', 26);
         $this->actingAs($owner)->getJson('/admin')->assertJsonPath('nextExpiryAt', now()->addMinute()->toISOString());
         $this->travel(1)->minute();
         $this->getJson('/admin')->assertJsonPath('messages.total', 25)->assertJsonPath('messages.next_page_url', null)
             ->assertJsonPath('nextExpiryAt', $laterExpiry);
+        $this->actingAs($admin)->getJson($next)
+            ->assertJsonCount(0, 'messages.data')->assertJsonPath('messages.total', 25)
+            ->assertJsonPath('messages.last_page', 1)->assertJsonPath('nextExpiryAt', $laterExpiry);
+    }
+
+    public function test_archive_cursor_keeps_ties_and_navigation_stable_without_recounting_or_using_offset(): void
+    {
+        $admin = User::factory()->create(['is_admin' => true]);
+        $recipient = 'archive@example.test';
+        $message = ['recipient' => $recipient, 'from' => 'writer@example.test'];
+        $time = now()->startOfSecond()->addMicroseconds(123456);
+        $oldest = Message::create($message + ['received_at' => $time->copy()->subMicrosecond()]);
+        $older = Message::create($message + ['received_at' => $time]);
+        $firstPage = [];
+        for ($index = 0; $index < 25; $index++) {
+            $firstPage[] = Message::create($message + ['received_at' => $time])->id;
+        }
+        $firstPage = array_reverse($firstPage);
+        $this->actingAs($admin);
+        $first = $this->getJson(route('panel.archive', compact('recipient'), false))->assertOk()
+            ->assertJsonPath('messages.total', 27);
+        $this->assertSame($firstPage, array_column($first->json('messages.data'), 'id'));
+
+        Message::create($message + ['received_at' => $time->copy()->addMicrosecond()]);
+        Message::create($message + ['received_at' => $time->copy()->subMicrosecond()]);
+        Message::create(['recipient' => 'other@example.test', 'received_at' => $time] + $message);
+
+        $next = $first->json('messages.next_page_url');
+        DB::enableQueryLog();
+        try {
+            $second = $this->getJson($next)->assertOk()->assertJsonPath('messages.current_page', 2)
+                ->assertJsonPath('messages.total', 27)->assertJsonPath('messages.next_page_url', null);
+            $previous = $this->getJson($second->json('messages.prev_page_url'))->assertOk()
+                ->assertJsonPath('messages.current_page', 1)->assertJsonPath('messages.prev_page_url', null);
+            foreach (DB::getQueryLog() as $query) {
+                $this->assertDoesNotMatchRegularExpression('/\b(count\s*\(|offset\b)/i', $query['query']);
+            }
+        } finally {
+            DB::disableQueryLog();
+            DB::flushQueryLog();
+        }
+        $this->assertSame([$older->id, $oldest->id], array_column($second->json('messages.data'), 'id'));
+        $this->assertSame($firstPage, array_column($previous->json('messages.data'), 'id'));
+        parse_str(parse_url($next, PHP_URL_QUERY), $query);
+        $this->assertNotEmpty($query['cursor']);
+        $query['page'] = (int) $query['page'];
+        $this->assertSame($query, $second->json('listQuery'));
+        $this->getJson(route('panel.message', ['message' => $oldest->id, ...$query], false))
+            ->assertJsonPath('backUrl', $next);
+
+        $this->getJson(route('panel.archive', ['recipient' => 'other@example.test'] + $query, false))
+            ->assertOk()->assertJsonCount(1, 'messages.data')->assertJsonPath('messages.current_page', 1);
+    }
+
+    public function test_publishing_an_older_pending_letter_between_archive_pages_keeps_the_next_link_usable(): void
+    {
+        $recipient = 'archive@example.test';
+        $email = ['recipient' => $recipient, 'from' => 'writer@example.test', 'received_at' => now()->startOfSecond()];
+        $pending = Message::create($email + ['is_pending' => true]);
+        for ($index = 0; $index < 50; $index++) {
+            Message::create($email);
+        }
+        $first = $this->actingAs(User::factory()->create(['is_admin' => true]))
+            ->getJson(route('panel.archive', compact('recipient'), false))->assertJsonPath('messages.total', 50);
+        $pending->update(['is_pending' => false]);
+
+        $second = $this->getJson($first->json('messages.next_page_url'))->assertJsonCount(25, 'messages.data')
+            ->assertJsonPath('messages.total', 51)->assertJsonPath('messages.last_page', 3);
+        $this->getJson($second->json('messages.next_page_url'))->assertJsonCount(1, 'messages.data')
+            ->assertJsonPath('messages.data.0.id', $pending->id)->assertJsonPath('messages.next_page_url', null);
+    }
+
+    public function test_returning_to_the_first_archive_page_keeps_its_newest_letter_after_a_pending_delivery(): void
+    {
+        $recipient = 'archive@example.test';
+        $time = now()->startOfSecond();
+        $email = ['recipient' => $recipient, 'from' => 'writer@example.test'];
+        $pending = Message::create($email + ['received_at' => $time->copy()->subMillisecond(), 'is_pending' => true]);
+        for ($index = 49; $index >= 0; $index--) {
+            Message::create($email + ['received_at' => $time->copy()->subSeconds($index)]);
+        }
+        $first = $this->actingAs(User::factory()->create(['is_admin' => true]))
+            ->getJson(route('panel.archive', compact('recipient'), false))->assertJsonCount(25, 'messages.data');
+        $original = array_column($first->json('messages.data'), 'id');
+        $pending->update(['is_pending' => false]);
+        Message::create($email + ['received_at' => $time->copy()->addSecond()]);
+
+        $second = $this->getJson($first->json('messages.next_page_url'))->assertJsonPath('messages.current_page', 2);
+        $returned = $this->getJson($second->json('messages.prev_page_url'))
+            ->assertJsonPath('messages.data.0.id', $original[0])->assertJsonPath('messages.data.1.id', $pending->id)
+            ->assertJsonPath('messages.total', 51)->assertJsonPath('messages.current_page', 1)
+            ->assertJsonPath('messages.prev_page_url', null)->assertJsonPath('recipient', $recipient);
+        $this->assertSame([$original[0], $pending->id, ...array_slice($original, 1, 23)], array_column($returned->json('messages.data'), 'id'));
+        $this->getJson($returned->json('messages.next_page_url'))->assertJsonPath('messages.data.0.id', $original[24]);
     }
 
     public function test_bootstrap_command_creates_an_admin_and_cannot_promote_an_existing_account(): void
@@ -437,23 +545,27 @@ class PanelTest extends TestCase
         $filter = ['recipient' => $owner->email, 'page' => 2];
         $filteredArchive = route('panel.archive', $filter, false);
         $olderLetter = route('panel.message', ['message' => $letters[25]->id, ...$filter]);
-        $this->getJson($filteredArchive)->assertJsonPath('messages.data.0.id', $letters[25]->id)
+        $second = $this->getJson($filteredArchive)->assertJsonPath('messages.data.0.id', $letters[25]->id)
             ->assertJsonPath('messages.total', 26)->assertJsonPath('messages.last_page', 2)
             ->assertJsonPath('messages.current_page', 2)->assertJsonPath('listQuery', $filter)
-            ->assertJsonPath('messages.prev_page_url', route('panel.archive', ['recipient' => $owner->email, 'page' => 1], false))
             ->assertJsonPath('messages.next_page_url', null);
+        $this->getJson($second->json('messages.prev_page_url'))->assertJsonPath('messages.data.0.id', $letters[0]->id)
+            ->assertJsonPath('messages.current_page', 1)->assertJsonPath('recipient', $owner->email);
         $this->getJson($olderLetter)->assertJsonPath('backUrl', $filteredArchive);
-        $this->getJson(route('panel.index', ['recipient' => $owner->email, 'ticket' => 'unused'], false))
-            ->assertJsonPath('messages.next_page_url', $filteredArchive);
+        $next = $this->getJson(route('panel.index', ['recipient' => $owner->email, 'ticket' => 'unused'], false))
+            ->json('messages.next_page_url');
+        $this->assertStringStartsWith($filteredArchive.'&cursor=', $next);
+        $this->getJson($next)->assertJsonPath('messages.data.0.id', $letters[25]->id);
         $this->getJson('/admin?issued=1&ticket=unused&page=2')
             ->assertJsonPath('mailboxes.prev_page_url', '/admin/mailboxes?page=1')
             ->assertJsonPath('mailboxes.next_page_url', null);
 
         $ownerPage = route('panel.index', ['page' => 2], false);
         $ownerLetter = route('panel.message', ['message' => $letters[25]->id, 'page' => 2]);
-        $this->actingAs($owner)->getJson($ownerPage)->assertJsonPath('messages.data.0.id', $letters[25]->id)
-            ->assertJsonPath('listQuery', ['page' => 2])
-            ->assertJsonPath('messages.prev_page_url', '/admin?page=1');
+        $second = $this->actingAs($owner)->getJson($ownerPage)->assertJsonPath('messages.data.0.id', $letters[25]->id)
+            ->assertJsonPath('listQuery', ['page' => 2]);
+        $this->getJson($second->json('messages.prev_page_url'))->assertJsonPath('messages.data.0.id', $letters[0]->id)
+            ->assertJsonPath('messages.current_page', 1);
         $this->getJson($ownerLetter)->assertJsonPath('backUrl', $ownerPage);
     }
 

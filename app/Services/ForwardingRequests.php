@@ -138,7 +138,7 @@ final class ForwardingRequests
         $domain = substr(strrchr($normalized, '@'), 1);
 
         return ! MailboxDomain::where('name', $domain)->exists()
-            && $domain !== strtolower((string) config('forwarding.bounce_domain'));
+            && $domain !== config('forwarding.bounce_domain');
     }
 
     public static function codeHash(MailboxForwardingRule $rule, string $code): string

@@ -257,7 +257,8 @@ function goToLastPage(data: PanelPageData) {
     correctionHeight.value = main.value?.offsetHeight
     page.value = data
     tabCache.delete(route.path)
-    void router.replace({ path: route.path, query: { ...route.query, page: last > 1 ? last : undefined }, hash: route.hash })
+    const cursor = data.screen === 'archive' ? undefined : route.query.cursor
+    void router.replace({ path: route.path, query: { ...route.query, page: last > 1 ? last : undefined, cursor }, hash: route.hash })
     return true
 }
 

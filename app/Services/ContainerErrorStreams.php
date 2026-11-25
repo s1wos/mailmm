@@ -16,6 +16,8 @@ use RuntimeException;
 
 class ContainerErrorStreams
 {
+    public const RETENTION_DAYS = 30;
+
     private const GATEWAY = 'http://log-reader:8080';
 
     /** @return array<string, array{path: string, service: string, exited: bool}> */
@@ -68,7 +70,8 @@ class ContainerErrorStreams
         $key = 'admin-error-log-position:'.$id;
         $saved = (int) Cache::get($key, 0);
         $newest = $saved;
-        $query = ['since' => $saved] + ($follow ? ['follow' => 1] : ['until' => time()]);
+        $query = ['since' => max($saved, now()->subDays(self::RETENTION_DAYS)->timestamp)]
+            + ($follow ? ['follow' => 1] : ['until' => time()]);
         $response = Http::timeout($follow ? 0 : 30)->withOptions(['stream' => true, 'read_timeout' => $follow ? 0 : 30])
             ->get(self::GATEWAY.'/logs/'.$source['path'], $query);
         if ($response->notFound()) {
@@ -84,7 +87,8 @@ class ContainerErrorStreams
                     continue;
                 }
                 $date = new DateTimeImmutable(substr($line, 0, $separator));
-                $error = ContainerErrorParser::parse($source['service'], substr($line, $separator + 1));
+                $error = $date > now()->subDays(self::RETENTION_DAYS)
+                    ? ContainerErrorParser::parse($source['service'], substr($line, $separator + 1)) : null;
                 $newest = max($newest, $date->getTimestamp());
                 $checkpointDue = $newest - $saved >= 15;
                 if ($error === null && ! $checkpointDue) {

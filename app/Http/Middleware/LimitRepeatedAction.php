@@ -40,6 +40,9 @@ class LimitRepeatedAction
     {
         $encoded = ($request->query() + $request->only('cursor'))['cursor'] ?? null;
         $cursor = Cursor::fromEncoded($encoded)?->toArray();
+        if ($request->hasHeader('X-Inbox-Until') && is_numeric($cursor['inbox_revision'] ?? null)) {
+            return 'revision:'.(int) $cursor['inbox_revision'];
+        }
         if (! is_numeric($cursor['id'] ?? null) || ! is_string($cursor['received_at'] ?? null)) {
             return 'first';
         }

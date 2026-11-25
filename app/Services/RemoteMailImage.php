@@ -30,11 +30,17 @@ class RemoteMailImage
             if ($addresses === [] || ! array_all($addresses, $this->isPublicIp(...))) {
                 return null;
             }
-            $timeout = $this->remainingMs($deadline);
-            if ($timeout <= 0 || $remainingBytes <= 0) {
-                return null;
+            $response = null;
+            foreach ($addresses as $address) {
+                $timeout = $this->remainingMs($deadline);
+                if ($timeout <= 0 || $remainingBytes <= 0) {
+                    return null;
+                }
+                $response = $this->download($uri, $address, $timeout, $remainingBytes);
+                if ($response === null || $response['status'] !== 0) {
+                    break;
+                }
             }
-            $response = $this->download($uri, $addresses[0], $timeout, $remainingBytes);
             if ($response === null) {
                 return null;
             }
@@ -167,8 +173,12 @@ class RemoteMailImage
                 return $length;
             },
         ]);
-        if (! $configured || curl_exec($curl) === false) {
+        if (! $configured) {
             return null;
+        }
+        if (curl_exec($curl) === false) {
+            // Only try another peer when the failed attempt consumed no response data.
+            return $headerBytes === 0 && $bytes === '' ? ['status' => 0, 'location' => '', 'bytes' => ''] : null;
         }
 
         return ['status' => curl_getinfo($curl, CURLINFO_RESPONSE_CODE), 'location' => $location, 'bytes' => $bytes];

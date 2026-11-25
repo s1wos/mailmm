@@ -72,6 +72,13 @@ function describe(cause: unknown) {
         ? cause.message : 'Не удалось связаться с сервером. Проверьте соединение.'
 }
 
+type ReceiptPosition = Pick<MessageSummary, 'id' | 'received_at'>
+
+function compareReceived(a: ReceiptPosition, b: ReceiptPosition) {
+    if (a.received_at === b.received_at) return b.id - a.id
+    return a.received_at > b.received_at ? -1 : 1
+}
+
 export const useEmailStore = defineStore('email', () => {
     const mailbox = ref<Mailbox | null>(null)
     const panelUrl = ref<string | null>(null)
@@ -113,11 +120,16 @@ export const useEmailStore = defineStore('email', () => {
     let refreshAgain = false
     let expanded = false
     let inboxSnapshot: string | null = null
+    let expiryRecoveryBoundary: ReceiptPosition | null = null
     let detailRequest: AbortController | null = null
     let clock: { time: number, mark: number, wallTime: number } | null = null
 
+    function anchoredNow() {
+        return clock ? clock.time + (performance.now() - clock.mark) : -Infinity
+    }
+
     function serverNow() {
-        return clock ? clock.time + Math.max(performance.now() - clock.mark, Date.now() - clock.wallTime) : Date.now()
+        return clock ? Math.max(anchoredNow(), clock.time + (Date.now() - clock.wallTime)) : Date.now()
     }
 
     function setClock(value: string) {
@@ -188,11 +200,15 @@ export const useEmailStore = defineStore('email', () => {
         }
     }
 
-    async function readPage(box: number, cursor?: string, more = false) {
+    async function readPage(box: number, cursor?: string, more = false, delta?: { since: string, through?: string }) {
         const path = cursor ? '/api/messages?cursor=' + encodeURIComponent(cursor) : '/api/messages'
-        const response = await request(path, more ? { headers: { 'X-Mailmm-Action': 'more' } } : {})
+        const headers = new Headers()
+        if (more) headers.set('X-Mailmm-Action', 'more')
+        if (delta) headers.set('X-Inbox-Since', delta.since)
+        if (delta?.through) headers.set('X-Inbox-Until', delta.through)
+        const response = await request(path, { headers })
         if (response.headers.get('X-Mailbox-Id') !== String(box)) return null
-        return await response.json() as MessagePage
+        return { page: await response.json() as MessagePage, snapshot: response.headers.get('X-Inbox-Snapshot') }
     }
 
     function closeMessage() {
@@ -243,16 +259,21 @@ export const useEmailStore = defineStore('email', () => {
         loadingMore.value = true
         moreError.value = ''
         try {
-            const page = await readPage(box, cursor, true)
+            const result = await readPage(box, cursor, true)
             if (mailbox.value?.id !== box || cursor !== nextCursor.value) return
-            if (!page) {
+            if (!result) {
                 clear()
                 void refresh({ afterPending: true })
                 return
             }
             expanded = true
+            const { page } = result
             messages.value.push(...page.data)
             nextCursor.value = page.meta.next_cursor
+            const tail = page.data.at(-1)
+            if (expiryRecoveryBoundary && tail) {
+                expiryRecoveryBoundary = { id: tail.id, received_at: tail.received_at }
+            }
         } catch (cause) {
             if (mailbox.value?.id === box) moreError.value = describe(cause)
         } finally {
@@ -268,6 +289,7 @@ export const useEmailStore = defineStore('email', () => {
         closeMessage()
         expanded = false
         inboxSnapshot = null
+        expiryRecoveryBoundary = null
         nextCursor.value = null
         loadingMore.value = false
         moreError.value = ''
@@ -296,14 +318,56 @@ export const useEmailStore = defineStore('email', () => {
 
     function expire(now: number) {
         if (earliestExpiry.value <= now) {
-            messages.value = messages.value.filter(message => Date.parse(message.expires_at) > now)
-            inboxSnapshot = null
+            const boundary = messages.value.at(-1)
+            const anchoredTime = anchoredNow()
+            let uncertain = false
+            messages.value = messages.value.filter(message => {
+                const expires = Date.parse(message.expires_at)
+                if (expires > now) return true
+                if (expires > anchoredTime) uncertain = true
+                return false
+            })
+            // Wall time can jump ahead. Recheck the list if wall time alone dropped a header.
+            if (uncertain || !expanded) {
+                if (uncertain && expanded && boundary && !expiryRecoveryBoundary) {
+                    expiryRecoveryBoundary = { id: boundary.id, received_at: boundary.received_at }
+                }
+                inboxSnapshot = null
+            } else if (inboxSnapshot && boundary && Date.parse(boundary.expires_at) <= now) {
+                nextCursor.value = null
+            }
             if (!messages.value.some(message => message.id === selectedId.value)) closeMessage()
         }
         if (!mailbox.value?.expires_at || Date.parse(mailbox.value.expires_at) > now) return false
         revision++
         clear()
         return true
+    }
+
+    async function readDeltas(
+        first: MessagePage, nextPage: (cursor: string) => Promise<MessagePage | null>, current: () => boolean,
+    ) {
+        const rows: MessageSummary[] = []
+        let page: MessagePage | null = first
+        while (page?.meta.delta && current()) {
+            rows.push(...page.data)
+            const next = page.meta.next_cursor
+            if (!next) return rows
+            page = await nextPage(next)
+        }
+        return null
+    }
+
+    function applyDelta(rows: MessageSummary[], snapshot: string, now: number) {
+        const boundary = nextCursor.value ? messages.value.at(-1) : undefined
+        const merged = new Map(messages.value.map(row => [row.id, row]))
+        for (const row of rows) {
+            if (!boundary || compareReceived(row, boundary) <= 0) merged.set(row.id, row)
+        }
+        messages.value = [...merged.values()].filter(row => Date.parse(row.expires_at) > now).sort(compareReceived)
+        if (boundary && Date.parse(boundary.expires_at) <= now) nextCursor.value = null
+        inboxSnapshot = snapshot
+        if (!messages.value.some(row => row.id === selectedId.value)) closeMessage()
     }
 
     async function applyPages(
@@ -316,11 +380,9 @@ export const useEmailStore = defineStore('email', () => {
         let page = first
         let next: string | null = null
         while (page && current()) {
-            const oldest = expanded ? messages.value.at(-1) : messages.value.find(row => row.id === selectedId.value)
+            const oldest = expanded ? expiryRecoveryBoundary ?? messages.value.at(-1) : messages.value.find(row => row.id === selectedId.value)
             next = page.meta.next_cursor
-            const boundaryIndex = oldest && !fullyExpanded ? page.data.findIndex(row =>
-                row.received_at < oldest.received_at || (row.received_at === oldest.received_at && row.id <= oldest.id),
-            ) : -1
+            const boundaryIndex = oldest && !fullyExpanded ? page.data.findIndex(row => compareReceived(row, oldest) >= 0) : -1
             if (expanded && boundaryIndex >= 0) {
                 const visibleCount = page.data[boundaryIndex].id === oldest?.id ? boundaryIndex + 1 : boundaryIndex
                 rows.push(...page.data.slice(0, visibleCount))
@@ -328,13 +390,14 @@ export const useEmailStore = defineStore('email', () => {
             } else {
                 rows.push(...page.data)
             }
-            if (!oldest || boundaryIndex >= 0 || !next) break
+            if ((!oldest && !fullyExpanded) || boundaryIndex >= 0 || !next) break
             page = await nextPage(next)
         }
         if (!current() || !page) return false
         messages.value = rows
         nextCursor.value = next
         inboxSnapshot = snapshot
+        expiryRecoveryBoundary = null
         if (!messages.value.some(message => message.id === selectedId.value)) closeMessage()
         return true
     }
@@ -365,8 +428,25 @@ export const useEmailStore = defineStore('email', () => {
                 return
             }
 
-            const applied = await applyPages(snapshot, await readPage(data.id), cursor => readPage(data.id, cursor), () => version === revision)
+            const since = expanded ? inboxSnapshot : null
+            const first = await readPage(data.id, undefined, false, since ? { since } : undefined)
             if (version !== revision) return
+            let applied: boolean
+            if (first?.page.meta.delta && since && first.snapshot) {
+                const through = first.snapshot
+                const rows = await readDeltas(first.page, async cursor => {
+                    const result = await readPage(data.id, cursor, false, { since, through })
+                    return result?.snapshot === through ? result.page : null
+                }, () => version === revision && inboxSnapshot === since)
+                if (version !== revision) return
+                if (inboxSnapshot !== since) continue
+                if (rows) applyDelta(rows, through, anchoredNow())
+                applied = rows !== null
+            } else {
+                applied = await applyPages(first?.snapshot ?? snapshot, first?.page ?? null,
+                    async cursor => (await readPage(data.id, cursor))?.page ?? null, () => version === revision)
+                if (version !== revision) return
+            }
             if (!applied) {
                 clear()
                 continue
@@ -391,23 +471,35 @@ export const useEmailStore = defineStore('email', () => {
             await Promise.all(previous)
             if (!current()) return false
             try {
-                let reply = await socket.check(inboxSnapshot, reason, deliveryId)
+                const since = inboxSnapshot
+                const delta = expanded && since !== null
+                let reply = await socket.check(since, reason, deliveryId, delta)
                 if (!current()) return false
                 const snapshot = reply.snapshot
                 if (reply.mailboxId !== socket.mailboxId) throw new SocketError('invalid_request')
                 if (reply.unchanged) {
-                    if (inboxSnapshot !== snapshot) throw new SocketError('invalid_request')
+                    if (since !== snapshot) throw new SocketError('invalid_request')
+                    if (inboxSnapshot !== since) return false
                 } else {
                     if (!reply.page) throw new SocketError('invalid_request')
-                    const applied = await applyPages(snapshot, reply.page, async () => {
+                    const first = reply.page
+                    const nextPage = async () => {
                         if (!reply.continuation) throw new SocketError('invalid_request')
                         reply = await socket.page(reply.continuation)
-                        if (reply.mailboxId !== socket.mailboxId || reply.snapshot !== snapshot || !reply.page) {
+                        if (reply.mailboxId !== socket.mailboxId || reply.snapshot !== snapshot || !reply.page
+                            || reply.page.meta.delta !== first.meta.delta) {
                             throw new SocketError('invalid_request')
                         }
                         return reply.page
-                    }, current)
-                    if (!applied || !current()) return false
+                    }
+                    if (first.meta.delta) {
+                        if (!delta) throw new SocketError('invalid_request')
+                        const rows = await readDeltas(first, nextPage, () => current() && inboxSnapshot === since)
+                        if (!rows || !current() || inboxSnapshot !== since) return false
+                        applyDelta(rows, snapshot, Date.parse(reply.serverTime))
+                    } else if (!await applyPages(snapshot, first, nextPage, current) || !current()) {
+                        return false
+                    }
                 }
                 if (suspendedMailbox.value) {
                     mailbox.value = suspendedMailbox.value.address

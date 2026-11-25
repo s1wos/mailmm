@@ -106,6 +106,59 @@ class ForwardingRequestsTest extends TestCase
         $this->postJson($url.'/forwards', $data)->assertNotFound();
     }
 
+    public function test_bulk_status_reads_one_message_and_one_operation_batch_regardless_of_batch_size(): void
+    {
+        $owner = $this->owner();
+        $message = $this->letter($owner);
+        $ids = [];
+        for ($index = 0; $index < 10; $index++) {
+            $ids[] = MailForward::create(['message_id' => $message->id, 'mode' => 'manual',
+                'initiator_id' => $owner->id, 'destination' => 'reader@example.test'])->id;
+        }
+
+        $this->actingAs($owner);
+        foreach ([[$ids[0]], $ids] as $batch) {
+            DB::enableQueryLog();
+            try {
+                $forwards = $this->getJson("/admin/messages/{$message->id}/forwards?".http_build_query(['ids' => $batch]))
+                    ->assertOk()->json('forwards');
+                $queries = array_filter(DB::getQueryLog(), fn (array $query) => preg_match('/\bfrom "(?:messages|mail_forwards)"/i', $query['query']));
+                $this->assertCount(2, $queries);
+            } finally {
+                DB::disableQueryLog();
+                DB::flushQueryLog();
+            }
+            $this->assertEqualsCanonicalizing($batch, array_column($forwards, 'id'));
+        }
+        $this->getJson("/admin/messages/{$message->id}/forwards?".http_build_query(['ids' => [...$ids, (string) Str::uuid()]]))
+            ->assertUnprocessable()->assertJsonValidationErrors('ids');
+    }
+
+    public function test_bulk_status_omits_invisible_or_missing_operations_and_returns_terminal_statuses(): void
+    {
+        $owner = $this->owner();
+        $admin = User::factory()->create(['is_admin' => true]);
+        $message = $this->letter($owner);
+        $other = $this->letter($owner);
+        $data = ['message_id' => $message->id, 'destination' => 'reader@example.test'];
+        $automatic = MailForward::create($data + ['mode' => 'auto']);
+        $manual = MailForward::create($data + ['mode' => 'manual', 'initiator_id' => $admin->id]);
+        $accepted = MailForward::create($data + ['mode' => 'manual', 'initiator_id' => $owner->id, 'status' => 'accepted']);
+        $differentMessage = MailForward::create(['message_id' => $other->id, 'mode' => 'manual', 'initiator_id' => $owner->id] + $data);
+        $ids = [$automatic->id, $manual->id, $accepted->id, $differentMessage->id, (string) Str::uuid()];
+        $url = "/admin/messages/{$message->id}/forwards?".http_build_query(compact('ids'));
+
+        $this->getJson($url)->assertUnauthorized();
+        $this->actingAs($this->owner())->getJson($url)->assertNotFound();
+        $visible = $this->actingAs($owner)->getJson($url)->assertOk()->json('forwards');
+        $this->assertEqualsCanonicalizing([$automatic->id, $accepted->id], array_column($visible, 'id'));
+        $this->assertSame('accepted', array_column($visible, 'status', 'id')[$accepted->id]);
+        $this->actingAs($admin)->getJson($url)->assertOk()->assertJsonCount(1, 'forwards')->assertJsonPath('forwards.0.id', $manual->id);
+        $this->getJson($url, ['X-Panel-User' => (string) $owner->id])->assertConflict();
+        $message->update(['is_pending' => true]);
+        $this->actingAs($owner)->getJson($url)->assertNotFound();
+    }
+
     private function enableAutomatic(): void
     {
         config(['forwarding.auto_enabled' => true, 'forwarding.auto_enabled_at' => now()->subDay()->toISOString()]);

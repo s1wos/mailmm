@@ -12,6 +12,7 @@ use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Queue\WorkerOptions;
 use Illuminate\Support\Facades\Broadcast;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\ParallelTesting;
 use Illuminate\Support\Facades\Schema;
@@ -510,6 +511,7 @@ class MailDeliveryTest extends TestCase
         $broadcaster = new class extends NullBroadcaster
         {
             public int $attempts = 0;
+
             public array $delivered = [];
 
             public function broadcast(array $channels, $event, array $payload = []): void
@@ -543,17 +545,40 @@ class MailDeliveryTest extends TestCase
         self::assertStringNotContainsString('sensitive message body', file_get_contents($log));
     }
 
+    public function test_prune_queries_scale_with_batches_instead_of_individual_messages(): void
+    {
+        $cutoff = now()->subDays(Message::RETENTION_DAYS + 1);
+        for ($row = 0; $row < 201; $row++) {
+            Message::create(['recipient' => 'archive@mail.test', 'from' => 'shop@example.test',
+                'received_at' => $cutoff, 'body_text' => 'An old archived copy']);
+        }
+
+        $connection = DB::connection();
+        $connection->enableQueryLog();
+        try {
+            $this->artisan('mail:prune')->assertSuccessful();
+            $queries = collect($connection->getQueryLog())->filter(fn ($query) => str_contains($query['query'], '"messages"'));
+        } finally {
+            $connection->disableQueryLog();
+            $connection->flushQueryLog();
+        }
+
+        $this->assertLessThanOrEqual(10, $queries->count());
+        $this->assertDatabaseEmpty('messages');
+    }
+
     public function test_prune_keeps_the_row_for_retry_after_partial_filesystem_failure(): void
     {
         self::assertSame(0, $this->deliver('archive@mail.test'));
+        $failed = Message::sole();
+        self::assertSame(0, $this->deliver('second-archive@mail.test'));
         $this->travel(365)->days();
         $disk = Storage::disk('local');
-        $path = Message::sole()->attachments[1]['path'];
+        $path = $failed->attachments[1]['path'];
         $disk->delete($path);
         $disk->put($path.'/obstruction', 'occupied');
-
         $this->artisan('mail:prune')->assertFailed();
-        self::assertSame(1, Message::count());
+        self::assertSame($failed->id, Message::sole()->id);
         self::assertSame(0, Message::query()->retained()->count());
         $disk->deleteDirectory($path);
         $this->artisan('mail:prune')->assertSuccessful();

@@ -4,8 +4,11 @@ namespace App\Services;
 
 use App\Exceptions\ForwardingFailure;
 use App\Models\Message;
+use App\Rules\ForwardingAddress;
+use Dom\HTMLDocument;
 use Illuminate\Support\Facades\Storage;
 use League\Flysystem\UnableToReadFile;
+use Symfony\Component\Mime\Address;
 use Symfony\Component\Mime\Part\DataPart;
 use Symfony\Component\Mime\Part\Multipart\AlternativePart;
 use Symfony\Component\Mime\Part\Multipart\MixedPart;
@@ -27,10 +30,16 @@ final class ForwardingArchive
             $text = MailParserService::readableHtml($html);
         }
         // The archived recipient is the SMTP envelope recipient and may have been a blind copy.
-        $summary = 'От: '.$message->from."\r\n".'Получено: '.$message->received_at->toRfc2822String();
+        $author = ForwardingAddress::normalize($message->from);
+        $authorLine = $author === null ? 'Исходный отправитель неизвестен' : 'От: '.$author;
+        $summary = $authorLine."\r\n".'Получено: '.$message->received_at->toRfc2822String();
         $body = new TextPart($summary."\r\n\r\n".$text, 'utf-8', 'plain', 'base64');
         if ($html !== '') {
-            $body = new AlternativePart($body, new TextPart($html, 'utf-8', 'html', 'base64'));
+            $document = HTMLDocument::createFromString($html, LIBXML_NOERROR, 'UTF-8');
+            $byline = $document->createElement('p');
+            $byline->textContent = $authorLine;
+            $document->body->prepend($byline);
+            $body = new AlternativePart($body, new TextPart($document->saveHtml(), 'utf-8', 'html', 'base64'));
         }
 
         $parts = [];
@@ -48,7 +57,10 @@ final class ForwardingArchive
         if ($parts !== []) {
             $body = new MixedPart($body, ...$parts);
         }
-        $headers = ForwardingMime::newHeaders($id, $destination, $message->from, (string) $message->subject, 'Исходный отправитель неизвестен');
+        $headers = ForwardingMime::serviceHeaders($id, $destination, (string) $message->subject);
+        if ($author !== null) {
+            $headers->addMailboxListHeader('Reply-To', [new Address($author)]);
+        }
         $headers->addTextHeader('MIME-Version', '1.0');
         $wire = $headers->toString();
         foreach ($body->toIterable() as $chunk) {

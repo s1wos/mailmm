@@ -7,6 +7,7 @@ use App\Rules\ForwardingAddress;
 use App\Services\ForwardingRequests;
 use App\Services\ForwardingRules;
 use App\Services\PanelMessages;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
@@ -80,9 +81,27 @@ final class ForwardingController
 
     public function status(Request $request, int $message, string $forward): JsonResponse
     {
-        PanelMessages::for($request->user())->findOrFail($message, ['id']);
-        $operation = MailForward::where('message_id', $message)->visibleTo($request->user())->findOrFail($forward);
+        $operation = $this->visibleOperations($request, $message)->findOrFail($forward);
 
         return response()->json(['forward' => $operation->panelData()]);
+    }
+
+    public function statuses(Request $request, int $message): JsonResponse
+    {
+        $operations = $this->visibleOperations($request, $message);
+        $ids = $request->validate([
+            'ids' => ['required', 'array', 'list', 'max:10'],
+            'ids.*' => ['required', 'string', 'uuid'],
+        ])['ids'];
+
+        return response()->json(['forwards' => $operations->whereKey(array_map('strtolower', $ids))
+            ->get()->map(fn (MailForward $forward) => $forward->panelData())]);
+    }
+
+    private function visibleOperations(Request $request, int $message): Builder
+    {
+        PanelMessages::for($request->user())->findOrFail($message, ['id']);
+
+        return MailForward::where('message_id', $message)->visibleTo($request->user());
     }
 }

@@ -61,6 +61,36 @@ class RemoteMailImageTest extends TestCase
         self::assertNull($service->fetch('https://[2001:4860:4860::8888]/a'));
     }
 
+    public function test_an_unreachable_public_address_falls_back_to_another_approved_address(): void
+    {
+        $bytes = base64_decode(self::GIF);
+        $attempts = [];
+        $service = $this->createPartialMock(RemoteMailImage::class, ['resolve', 'download']);
+        $service->method('resolve')->willReturn(['8.8.8.8', '1.1.1.1']);
+        $service->expects($this->exactly(2))->method('download')
+            ->willReturnCallback(function (Http $uri, string $ip, int $timeout, int $budget) use (&$attempts, $bytes) {
+                $attempts[] = [$ip, $timeout, $budget];
+
+                return $ip === '8.8.8.8'
+                    ? ['status' => 0, 'location' => '', 'bytes' => '']
+                    : ['status' => 200, 'location' => '', 'bytes' => $bytes];
+            });
+
+        self::assertSame(['mime' => 'image/gif', 'bytes' => $bytes], $service->fetch('https://cdn.example.com/a'));
+        self::assertSame(['8.8.8.8', '1.1.1.1'], array_column($attempts, 0));
+        self::assertLessThanOrEqual($attempts[0][1], $attempts[1][1]);
+        self::assertSame($attempts[0][2], $attempts[1][2]);
+    }
+
+    public function test_a_failed_response_does_not_start_another_download(): void
+    {
+        $service = $this->createPartialMock(RemoteMailImage::class, ['resolve', 'download']);
+        $service->method('resolve')->willReturn(['8.8.8.8', '1.1.1.1']);
+        $service->expects($this->once())->method('download')->willReturn(null);
+
+        self::assertNull($service->fetch('https://cdn.example.com/a'));
+    }
+
     public static function rasterResponses(): iterable
     {
         $gif = base64_decode(self::GIF);

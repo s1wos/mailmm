@@ -1,12 +1,14 @@
 <?php
 
+use App\Rules\MailboxDomainName;
+
 return [
     'manual_enabled' => env('FORWARD_MANUAL_ENABLED', false),
     'auto_enabled' => env('FORWARD_AUTO_ENABLED', false),
     'manual_enabled_at' => env('FORWARD_MANUAL_ENABLED_AT'),
     'auto_enabled_at' => env('FORWARD_AUTO_ENABLED_AT'),
     'service_address' => env('FORWARD_SERVICE_ADDRESS'),
-    'bounce_domain' => strtolower((string) env('FORWARD_BOUNCE_DOMAIN', '')),
+    'bounce_domain' => MailboxDomainName::parse((string) env('FORWARD_BOUNCE_DOMAIN', '')) ?? '',
     'manual_dsn' => env('FORWARD_MANUAL_DSN'),
     'auto_dsn' => env('FORWARD_AUTO_DSN'),
     'webhook_secret' => env('FORWARD_WEBHOOK_SECRET'),

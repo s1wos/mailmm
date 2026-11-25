@@ -20,7 +20,16 @@ class ContainerErrorParser
 
         [$level, $message] = $match;
 
-        return ['level' => $level, 'message' => self::displayMessage($message)];
+        return ['level' => $level, 'message' => self::displayMessage($message, $service === 'smtp')];
+    }
+
+    public static function redactMailAddresses(string $message): string
+    {
+        $address = <<<'REGEX'
+            ~(*UCP)(?:"(?:[^"\\]|\\.)*"|(?:[a-zA-Z0-9.!#$%&'*+/=?^_`{|}\x7e-]++|[^\x00-\x7f\s]++)++)@(?:\[[^\]\r\n]+\]|[\pL\pM\pN.-]+)~u
+            REGEX;
+
+        return preg_replace($address, '[redacted]', mb_scrub($message, 'UTF-8')) ?? '[redacted]';
     }
 
     private static function nginx(string $line): ?array
@@ -80,7 +89,7 @@ class ContainerErrorParser
         return null;
     }
 
-    private static function displayMessage(string $message): string
+    private static function displayMessage(string $message, bool $redactSmtp): string
     {
         $message = preg_replace(
             [
@@ -94,6 +103,8 @@ class ContainerErrorParser
             $message,
         );
 
-        return mb_strcut(mb_scrub(trim($message), 'UTF-8'), 0, 8192, 'UTF-8');
+        $message = $redactSmtp ? self::redactMailAddresses($message) : mb_scrub($message, 'UTF-8');
+
+        return mb_strcut(trim($message), 0, 8192, 'UTF-8');
     }
 }

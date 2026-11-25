@@ -7,7 +7,6 @@ use App\Models\MailForward;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Str;
 
 class RecoverMailForwards extends Command
 {
@@ -56,28 +55,21 @@ class RecoverMailForwards extends Command
         // A queue reservation can exhaust its tries before the worker commits its first claim.
         $due = MailForward::where('status', 'queued')->where('updated_at', '<', now()->subMinutes(3))
             ->where(fn ($query) => $query->whereNull('next_attempt_at')->orWhere('next_attempt_at', '<=', now()));
-        $missing = $due->pluck('id')->flip();
-        if ($missing->isEmpty()) {
-            return;
-        }
+        $name = DB::getDriverName() === 'pgsql'
+            ? "case when payload is json then payload::json->>'displayName' end"
+            : "case when json_valid(payload) then json_extract(payload, '$.displayName') end";
+        // A release replaces its reserved row atomically, keeping the same display name.
+        $job = DB::table(config('queue.connections.forwarding.table'))->selectRaw('1')
+            ->whereRaw("queue = 'forwarding'")
+            ->whereRaw("({$name}) = ? || mail_forwards.id", [SendMailForward::class.':'])
+            ->limit(1);
+        $missing = $due->whereRaw("({$job->toSql()}) is null", $job->getBindings());
 
-        // Reserved jobs and jobs released with a new database ID are both still live.
-        $jobs = DB::table(config('queue.connections.forwarding.table'))->where('queue', 'forwarding');
-        $lastId = $jobs->max('id');
-        if ($lastId !== null) {
-            foreach ($jobs->where('id', '<=', $lastId)->select('id', 'payload')->lazyById(200) as $job) {
-                $name = json_decode($job->payload, true)['displayName'] ?? '';
-                $missing->forget(Str::after($name, SendMailForward::class.':'));
-                if ($missing->isEmpty()) {
-                    return;
-                }
-            }
-        }
-        foreach ($missing->keys() as $id) {
-            DB::transaction(function () use ($due, $id) {
-                // Updating the stale timestamp claims the repair even if two schedulers overlap.
-                if ((clone $due)->whereKey($id)->update(['updated_at' => now()])) {
-                    Bus::dispatch(new SendMailForward($id));
+        foreach ($missing->select('id')->lazyById(100) as $op) {
+            DB::transaction(function () use ($missing, $op) {
+                // Recheck the queue and claim the repair if schedulers overlap.
+                if ((clone $missing)->whereKey($op->id)->update(['updated_at' => now()])) {
+                    Bus::dispatch(new SendMailForward($op->id));
                 }
             }, 3);
         }

@@ -338,11 +338,11 @@ test('when temporary mailboxes close, a vanished page returns to a fresh first p
 
 test('when the last filtered archive page expires the panel returns to the remaining page', async t => {
     const filtered = archivePath + '?recipient=owner@example.test'
-    const second = filtered + '&page=2'
+    const second = filtered + '&page=2&cursor=second-page'
     const panel = await openPanel(t, second)
     t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.parse(beforeExpiry) })
     const page = {
-        ...archive(admin), recipient: owner.email, listQuery: { recipient: owner.email, page: 2 },
+        ...archive(admin), recipient: owner.email, listQuery: { recipient: owner.email, page: 2, cursor: 'second-page' },
         serverTime: beforeExpiry, nextExpiryAt: expiry, messages: {
             ...emptyList, current_page: 2, last_page: 2, prev_page_url: filtered,
             data: pageOfLetters(1, expiry), total: 26,

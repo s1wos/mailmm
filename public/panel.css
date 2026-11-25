@@ -19,8 +19,6 @@ a { color: var(--primary); text-decoration: none; }
 button, input, select { font: inherit; }
 button, summary { cursor: pointer; }
 button { color: inherit; }
-:focus-visible { outline: 3px solid #6855d9; outline-offset: 3px; }
-select:focus-visible { outline: none; border-color: var(--mm-focus, var(--primary)); }
 #content:focus:not(:target) { outline: none; }
 .skip-link { position: fixed; left: .75rem; top: -5rem; z-index: 30; padding: .65rem 1rem; border-radius: .65rem; background: white; }
 .skip-link:focus { top: .75rem; }
@@ -156,6 +154,7 @@ input:not([type=hidden]):not([type=checkbox]), select { width: 100%; min-width: 
 .domain-settings .stack-form { max-width: 28rem; }
 input::placeholder { color: #71798d; }
 input:hover { border-color: #a8a5c9; }
+input:not([type=hidden]):not([type=checkbox]):focus-visible, select:focus-visible { border-color: var(--mm-focus, var(--primary)); }
 .input-icon { position: relative; flex: 1; min-width: 0; }
 .input-icon > .icon { position: absolute; top: 50%; left: .75rem; transform: translateY(-50%); color: var(--muted); }
 .input-icon > input:not([type=hidden]):not([type=checkbox]) { padding-left: 2.35rem; }
@@ -182,6 +181,7 @@ input:hover { border-color: #a8a5c9; }
 .detail-list dt { color: var(--muted); }
 .detail-list dd, .description { overflow-wrap: anywhere; }
 .toggle-field { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin: 0; padding: .85rem; background: var(--canvas); border: 1px solid var(--line); border-radius: .72rem; cursor: pointer; }
+.toggle-field:has(:focus-visible) { text-decoration: underline; text-underline-offset: .2em; }
 .switch { appearance: none; float: none; flex: 0 0 auto; width: 2.5rem; height: 1.45rem; border-radius: 2rem; background: #8b91a2; margin: 0; padding: 3px; cursor: pointer; }
 .switch::before { display: block; content: ''; width: 1.08rem; height: 1.08rem; background: white; border-radius: 50%; transition: transform .16s; }
 .switch:checked { background: var(--primary); }
@@ -226,8 +226,6 @@ input:hover { border-color: #a8a5c9; }
 .login-form-block .stack-form input:focus {
     border-color: var(--primary);
     background: var(--paper);
-    outline: 2px solid var(--mm-focus, var(--primary));
-    outline-offset: 2px;
 }
 .login-form-block .error { margin: 0; }
 .login-form-block .button {

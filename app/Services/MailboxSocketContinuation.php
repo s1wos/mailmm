@@ -13,14 +13,15 @@ use JsonException;
 
 final class MailboxSocketContinuation
 {
-    public static function issue(string $grant, string $snapshot, string $cursor): string
+    public static function issue(string $grant, string $snapshot, string $cursor, ?string $deltaSince = null): string
     {
         return Crypt::encryptString(json_encode([
             'grant' => $grant, 'snapshot' => $snapshot, 'cursor' => $cursor, 'expires' => now()->addMinute()->timestamp,
+            'deltaSince' => $deltaSince,
         ], JSON_THROW_ON_ERROR));
     }
 
-    /** @return array{snapshot: string, cursor: Cursor}|null */
+    /** @return array{snapshot: string, cursor: Cursor, deltaSince: ?string}|null */
     public static function consume(string $token, string $grant): ?array
     {
         try {
@@ -30,8 +31,12 @@ final class MailboxSocketContinuation
                 || ! is_string($page['cursor'] ?? null)) {
                 return null;
             }
+            $deltaSince = $page['deltaSince'] ?? null;
+            if ($deltaSince !== null && ! is_string($deltaSince)) {
+                return null;
+            }
             $cursor = Cursor::fromEncoded($page['cursor']);
-            Validator::validate($cursor?->toArray() ?? [], MailboxCursor::rules());
+            Validator::validate($cursor?->toArray() ?? [], MailboxCursor::rules($deltaSince !== null));
         } catch (DecryptException|JsonException|ValidationException) {
             return null;
         }
@@ -41,6 +46,6 @@ final class MailboxSocketContinuation
             return null;
         }
 
-        return ['snapshot' => $page['snapshot'], 'cursor' => $cursor];
+        return ['snapshot' => $page['snapshot'], 'cursor' => $cursor, 'deltaSince' => $deltaSince];
     }
 }

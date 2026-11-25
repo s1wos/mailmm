@@ -85,7 +85,10 @@ async function save(event: SubmitEvent, method: string) {
                 Действует с <time :datetime="rule.activated_at">{{ formatTimestamp(rule.activated_at) }} UTC</time>.
                 У пересланных писем сохраняется исходный отправитель.
             </p>
-            <p v-if="problem && problem !== 'owner_disabled'" class="error">{{ describeForwardError(problem) }}</p>
+            <template v-if="problem && problem !== 'owner_disabled'">
+                <p v-if="rule.status === 'disabled' && rule.disabled_reason" class="error">{{ describeForwardError(problem) }}</p>
+                <p v-else class="hint">Последнее предупреждение об отправке. {{ describeForwardError(problem) }}</p>
+            </template>
             <p v-if="notice" class="hint">{{ notice }}</p>
         </div>
         <template v-if="editing">

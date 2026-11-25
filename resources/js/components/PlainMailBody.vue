@@ -15,4 +15,5 @@ const parts = computed(() => splitMailLinks(props.text))
 
 <style scoped>
 a { color: var(--mm-primary); text-decoration: underline; }
+a:focus-visible { text-decoration-style: double; }
 </style>

@@ -98,7 +98,7 @@ class MailboxSocketHandler
                 $automatic = true;
             }
         }
-        $fields = array_intersect_key($data, array_flip(['reason', 'snapshot', 'requestId', 'continuation', 'deliveryId']));
+        $fields = array_intersect_key($data, array_flip(['reason', 'snapshot', 'requestId', 'continuation', 'deliveryId', 'delta']));
         $job = ['command' => $command, 'data' => $fields, 'socket' => $connection->id(), 'channel' => $channel,
             'grant' => $member->data('grant'), 'automatic' => $automatic];
         $reply = function (array $result) use ($connection, $channel, $id, $member, $automatic, $delivery) {

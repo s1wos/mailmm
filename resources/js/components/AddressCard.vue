@@ -246,7 +246,6 @@ async function confirmRotation() {
 <style scoped>
 .copy-btn { display: inline-grid; }
 .copy-btn.btn:is(:hover, :active) { transform: none; }
-.copy-btn:focus-visible { outline: none; }
 .copy-btn:focus-visible > span { text-decoration: underline; text-underline-offset: .2em; }
 .copy-btn > svg { grid-area: 1 / 1; }
 .copy-btn > span { grid-area: 1 / 2; text-align: start; }
@@ -260,7 +259,7 @@ async function confirmRotation() {
     width: 100%; min-width: 0; padding: 9px 10px; font: inherit; font-weight: 400; color: var(--mm-ink);
     background: var(--mm-surface); border: 1px solid var(--mm-line); border-radius: 9px;
 }
-.address-field select:focus-visible { outline: none; border-color: var(--mm-focus); }
+.address-field select:focus-visible { border-color: var(--mm-focus); }
 .address-example { overflow-wrap: anywhere; }
 .modal-actions { margin-top: var(--action-spacing); }
 .modal-actions .btn:is(:hover, :active) { transform: none; }

@@ -15,7 +15,7 @@ export interface SocketReply {
 export interface InboxSocket {
     mailboxId: number
     active: boolean
-    check(snapshot: string | null, reason: CheckReason, deliveryId?: number): Promise<SocketReply>
+    check(snapshot: string | null, reason: CheckReason, deliveryId?: number, delta?: boolean): Promise<SocketReply>
     page(continuation: string): Promise<SocketReply>
 }
 
@@ -56,8 +56,8 @@ export class MailboxSocket implements InboxSocket {
         this.send = send
     }
 
-    check(snapshot: string | null, reason: CheckReason, deliveryId?: number) {
-        return this.request('mailbox.check', { snapshot, reason, deliveryId })
+    check(snapshot: string | null, reason: CheckReason, deliveryId?: number, delta?: boolean) {
+        return this.request('mailbox.check', { snapshot, reason, deliveryId, ...(delta && { delta }) })
     }
 
     page(continuation: string) {

@@ -6,6 +6,7 @@ use App\Services\MailboxSession;
 use App\Services\MailImageUrl;
 use App\Services\PanelMessages;
 use App\Services\RemoteMailImage;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Cache;
@@ -28,8 +29,20 @@ final class MailImageController
         if (($entry['digest'] ?? null) === $digest) {
             $image = $entry['image'];
         } else {
-            $image = $remote->fetch($url);
-            $cache->put($slot, ['digest' => $digest, 'image' => $image], $image === null ? 60 : 86400);
+            try {
+                $image = $cache->lock($slot.':fill', 8)->block(6, function () use ($cache, $slot, $digest, $remote, $url) {
+                    $entry = $cache->get($slot);
+                    if (($entry['digest'] ?? null) === $digest) {
+                        return $entry['image'];
+                    }
+                    $image = $remote->fetch($url);
+                    $cache->put($slot, ['digest' => $digest, 'image' => $image], $image === null ? 60 : 86400);
+
+                    return $image;
+                });
+            } catch (LockTimeoutException) {
+                abort(503, headers: ['Retry-After' => '1']);
+            }
         }
         abort_if($image === null, 404);
 

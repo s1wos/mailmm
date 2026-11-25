@@ -72,6 +72,35 @@ final class ForwardingIngressTest extends TestCase
         $this->assertDatabaseCount('mail_forwards', 1);
     }
 
+    public static function ineligibleAutomaticReceiptDates(): array
+    {
+        return [
+            'before automatic forwarding was enabled' => [-5, -30],
+            'before the mailbox rule was activated' => [-30, -5],
+        ];
+    }
+
+    #[DataProvider('ineligibleAutomaticReceiptDates')]
+    public function test_automatic_only_delivery_skips_scanning_old_postfix_receipts(int $enabledMinutes, int $activatedMinutes): void
+    {
+        $owner = User::factory()->create();
+        $box = $owner->mailbox()->create(['email' => $owner->email]);
+        $box->forceFill(['created_at' => now()->subHour()])->save();
+        config(['forwarding.manual_enabled' => false, 'forwarding.auto_enabled_at' => now()->addMinutes($enabledMinutes)->toISOString()]);
+        MailboxForwardingRule::create(['email_id' => $box->id, 'status' => 'active', 'version' => 1,
+            'destination' => 'client@example.org', 'activated_at' => now()->addMinutes($activatedMinutes)]);
+        Http::fake(['scanner.test/*' => Http::response(['action' => 'no action',
+            'milter' => ['add_headers' => ['Authentication-Results' => ['value' => self::HOST.'; none']]]])]);
+
+        $raw = 'Received: by '.self::HOST.' (Postfix) id ABCDEF; '.now()->subMinutes(10)->format('D, j M Y H:i:s O')."\r\n"
+            ."From: Shop <author@shop.test>\r\nSubject: Receipt\r\n\r\nOld mail";
+        app(MailDeliveryService::class)->deliver($box->email, $raw, PostfixReceipt::fromMessage($raw, self::HOST), self::CONTEXT);
+
+        Http::assertNothingSent();
+        $this->assertDatabaseEmpty('mail_forwards');
+        $this->assertDatabaseHas('messages', ['email_id' => $box->id, 'is_pending' => false]);
+    }
+
     public static function manualScreeningResults(): array
     {
         return [

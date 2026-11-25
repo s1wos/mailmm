@@ -10,6 +10,10 @@ use App\Services\MailboxSocketPool;
 use App\Services\MailboxSocketRead;
 use Closure;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Request;
+use Illuminate\Session\ArraySessionHandler;
+use Illuminate\Session\Store;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
@@ -24,6 +28,9 @@ use Laravel\Reverb\Protocols\Pusher\Server;
 use Laravel\Reverb\Servers\Reverb\Factory;
 use PHPUnit\Framework\Attributes\DataProvider;
 use React\EventLoop\Loop;
+use ReflectionProperty;
+use Symfony\Component\Process\InputStream;
+use Symfony\Component\Process\Process;
 use Tests\TestCase;
 
 class MailboxSocketTest extends TestCase
@@ -71,6 +78,97 @@ class MailboxSocketTest extends TestCase
             $this->assertFalse(MailboxSocketJobRequest::isValid($job, strlen(json_encode($job))));
         }
         $this->assertFalse(MailboxSocketJobRequest::isValid($authorize, MailboxSocketJobRequest::MAX_BYTES + 1));
+    }
+
+    public function test_socket_worker_reads_current_mailbox_access_for_each_frame(): void
+    {
+        $database = tempnam(sys_get_temp_dir(), 'mailmm-socket-');
+        $this->assertIsString($database);
+        config(['database.connections.socket_worker' => ['driver' => 'sqlite', 'database' => $database],
+            'cache.limiter' => 'file', 'session.driver' => 'cookie']);
+        $input = new InputStream;
+        $php = [PHP_BINARY];
+        if (PHP_OS_FAMILY === 'Windows' && (new Process([PHP_BINARY, '-r', 'exit(extension_loaded("pdo_sqlite") ? 0 : 1);']))->run() !== 0) {
+            $php = [PHP_BINARY, '-d', 'extension=pdo_sqlite'];
+        }
+        $worker = new Process([...$php, base_path('artisan'), 'mail:socket-read', '--worker', '--no-ansi'], base_path(), [
+            'APP_ENV' => 'testing', 'CACHE_STORE' => 'file', 'DB_CONNECTION' => 'sqlite', 'DB_DATABASE' => $database,
+            'DB_URL' => '', 'SESSION_DRIVER' => 'array',
+        ], $input, 20);
+        $grantKey = null;
+        try {
+            $this->assertSame(0, Artisan::call('migrate', ['--database' => 'socket_worker', '--force' => true]));
+            $first = Email::on('socket_worker')->create(['email' => 'first@test.invalid', 'expires_at' => now()->addDay()]);
+            $second = Email::on('socket_worker')->create(['email' => 'second@test.invalid', 'expires_at' => now()->addDay()]);
+            $first->messages()->create(['recipient' => $first->email, 'from' => 'sender@test.invalid',
+                'subject' => 'Private first', 'received_at' => now()]);
+            $second->messages()->create(['recipient' => $second->email, 'from' => 'sender@test.invalid',
+                'subject' => 'Private second', 'received_at' => now()]);
+            $session = new Store('mailmm_socket', new ArraySessionHandler(120));
+            $session->start();
+            $session->put('email_id', $first->id);
+            $request = Request::create('/');
+            $request->setLaravelSession($session);
+            $grant = MailboxSocketGrant::issue($request, $first, '1.2')['grant'];
+            $grantKey = MailboxSocketGrant::CACHE_PREFIX.'session:'.explode('.', $grant, 2)[0];
+
+            $worker->start();
+            $check = function (Email $mailbox, string $requestId) use ($grant, $input, $worker): array {
+                $job = ['grant' => $grant, 'socket' => '1.2', 'channel' => 'private-mailbox.'.$mailbox->id,
+                    'command' => 'mailbox.check', 'automatic' => true, 'data' => ['requestId' => $requestId, 'reason' => 'auto']];
+                $input->write(json_encode($job, JSON_THROW_ON_ERROR)."\n");
+                $reply = '';
+                $received = $worker->waitUntil(static function (string $type, string $chunk) use (&$reply) {
+                    if ($type === Process::OUT) {
+                        $reply .= $chunk;
+                    }
+
+                    return str_ends_with($reply, "\n");
+                });
+                $this->assertTrue($received, $worker->getErrorOutput());
+                $this->assertTrue($worker->isRunning());
+
+                return json_decode($reply, true, flags: JSON_THROW_ON_ERROR);
+            };
+            $reply = $check($first, 'first');
+            $this->assertSame('first', $reply['requestId']);
+            $this->assertSame('Private first', $reply['page']['data'][0]['subject']);
+            $this->assertSame(['requestId' => 'wrong', 'code' => 'access_revoked'], $check($second, 'wrong'));
+            $first->update(['closed_at' => now()]);
+            $this->assertSame(['requestId' => 'closed', 'code' => 'access_revoked'], $check($first, 'closed'));
+        } finally {
+            $input->close();
+            $worker->stop(0);
+            if ($grantKey !== null) {
+                Cache::store('file')->forget($grantKey);
+            }
+            DB::purge('socket_worker');
+            unlink($database);
+        }
+    }
+
+    public function test_socket_pool_reuses_a_worker_between_sequential_commands(): void
+    {
+        $pool = new MailboxSocketPool;
+        $idle = new ReflectionProperty($pool, 'idle');
+        $read = static function (string $requestId) use ($pool): array {
+            $reply = [];
+            $pool->submit(['grant' => 'missing.group', 'socket' => '1.2', 'channel' => 'private-mailbox.1',
+                'command' => 'mailbox.check', 'data' => ['requestId' => $requestId, 'reason' => 'auto']],
+                static function (array $result) use (&$reply): void {
+                    $reply = $result;
+                });
+            Loop::run();
+
+            return $reply;
+        };
+
+        $this->assertSame(['requestId' => 'first', 'code' => 'access_revoked'], $read('first'));
+        $workers = $idle->getValue($pool);
+        $this->assertCount(1, $workers);
+        $this->assertTrue($workers[0]->isRunning());
+        $this->assertSame(['requestId' => 'second', 'code' => 'access_revoked'], $read('second'));
+        $this->assertSame($workers, $idle->getValue($pool));
     }
 
     private function wire(): WebSocketConnection
@@ -503,6 +601,73 @@ class MailboxSocketTest extends TestCase
         $continuation = $this->read($context)['continuation'];
         $this->travel(61)->seconds();
         $this->assertSame('invalid_request', $this->read($context, ['continuation' => $continuation], 'mailbox.page')['code']);
+    }
+
+    public function test_open_inbox_reads_only_new_publications_over_http_and_socket(): void
+    {
+        $this->freezeTime();
+        $owner = User::factory()->create(['is_admin' => true]);
+        $email = Email::create(['email' => 'long-inbox@test.invalid', 'expires_at' => now()->addDay()]);
+        $this->actingAs($owner)->withSession([Auth::guard()->getName() => $owner->id, 'email_id' => $email->id]);
+        $this->withCookie(config('session.cookie'), app('session')->getId());
+        $fields = ['recipient' => $email->email, 'from' => 'sender'];
+        $pending = $email->messages()->create($fields + ['is_pending' => true, 'received_at' => now()->subDays(10)]);
+        foreach (range(1, 300) as $days) {
+            $email->messages()->create($fields + ['received_at' => now()->subDays($days)]);
+        }
+        $context = $this->grant($email->id);
+        $expiring = $email->messages()->create($fields + ['received_at' => now()->subDays(365)->addSecond()]);
+        DB::enableQueryLog();
+        $snapshot = $this->getJson('/api/email')->assertOk()->headers->get('X-Inbox-Snapshot');
+        $this->assertTrue($this->read($context, ['snapshot' => $snapshot, 'delta' => true])['unchanged']);
+        $snapshotQueries = array_column(DB::getQueryLog(), 'query');
+        DB::disableQueryLog();
+        $this->assertDoesNotMatchRegularExpression('/(?:count|min)\s*\(/i', implode("\n", $snapshotQueries));
+
+        $this->travel(2)->seconds();
+        $this->artisan('mail:prune')->assertSuccessful();
+        $this->assertDatabaseMissing('messages', ['id' => $expiring->id]);
+        $late = $email->messages()->create($fields + ['received_at' => now()->subDays(150)]);
+        $pending->update(['is_pending' => false]);
+        $change = $this->read($context, ['snapshot' => $snapshot, 'delta' => true]);
+        $this->assertTrue($change['page']['meta']['delta'] ?? false);
+        $this->assertEqualsCanonicalizing([$pending->id, $late->id], array_column($change['page']['data'], 'id'));
+        $this->assertNull($change['continuation']);
+        $this->getJson('/api/messages', ['X-Inbox-Since' => $snapshot])
+            ->assertOk()->assertHeader('X-Inbox-Snapshot', $change['snapshot'])
+            ->assertExactJson($change['page']);
+
+        $late->delete();
+        $this->getJson('/api/messages', ['X-Inbox-Since' => $change['snapshot']])
+            ->assertOk()->assertJsonCount(30, 'data')->assertJsonMissingPath('meta.delta');
+    }
+
+    public function test_a_burst_of_publications_uses_delta_continuations_even_as_more_arrive(): void
+    {
+        $owner = User::factory()->create(['is_admin' => true]);
+        $email = Email::create(['email' => 'burst-inbox@test.invalid', 'expires_at' => now()->addDay()]);
+        $this->actingAs($owner)->withSession([Auth::guard()->getName() => $owner->id, 'email_id' => $email->id]);
+        $this->withCookie(config('session.cookie'), app('session')->getId());
+        $context = $this->grant($email->id);
+        $snapshot = $this->getJson('/api/email')->headers->get('X-Inbox-Snapshot');
+        $fields = ['recipient' => $email->email, 'from' => 'sender'];
+        $published = [];
+        foreach (range(1, 32) as $days) {
+            $published[] = $email->messages()->create($fields + ['received_at' => now()->subDays($days)])->id;
+        }
+        $first = $this->read($context, ['snapshot' => $snapshot, 'delta' => true]);
+        $this->assertTrue($first['page']['meta']['delta'] ?? false);
+        $this->assertSame(array_slice($published, 0, 30), array_column($first['page']['data'], 'id'));
+        $this->getJson('/api/messages', ['X-Inbox-Since' => $snapshot])->assertExactJson($first['page']);
+
+        $email->messages()->create($fields + ['received_at' => now()->subDays(30)]);
+        $next = $this->read($context, ['continuation' => $first['continuation']], 'mailbox.page');
+        $this->assertSame($first['snapshot'], $next['snapshot']);
+        $this->assertSame(array_slice($published, 30), array_column($next['page']['data'], 'id'));
+        $this->assertNull($next['continuation']);
+        $this->getJson('/api/messages?cursor='.urlencode($first['page']['meta']['next_cursor']), [
+            'X-Inbox-Since' => $snapshot, 'X-Inbox-Until' => $first['snapshot'],
+        ])->assertOk()->assertHeader('X-Inbox-Snapshot', $first['snapshot'])->assertExactJson($next['page']);
     }
 
     public function test_a_stale_session_socket_or_closed_address_cannot_read_private_headers(): void

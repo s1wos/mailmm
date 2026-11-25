@@ -86,11 +86,13 @@ class MailDeliveryService
 
         $context = $message->forwarding_context;
         $manualCandidate = config('forwarding.manual_enabled') && isset($context['sender']) && $context['sender'] !== '';
-        $autoCandidate = ForwardingRequests::automaticSince() !== null && $message->email_id !== null
+        $automaticSince = ForwardingRequests::automaticSince();
+        $autoCandidate = $automaticSince !== null && $message->received_at->gte($automaticSince) && $message->email_id !== null
             && ($context['sender'] ?? null) !== '' && ! ForwardingIngress::suppressAutomatic($raw);
         $skipReason = null;
         // Capture authentication while the sender's DNS and the actual SMTP session are still current.
-        if ($manualCandidate || ($autoCandidate && MailboxForwardingRule::where('email_id', $message->email_id)->where('status', 'active')->exists())) {
+        if ($manualCandidate || ($autoCandidate && MailboxForwardingRule::where('email_id', $message->email_id)
+            ->where('status', 'active')->where('activated_at', '<=', $message->received_at->format('Y-m-d H:i:s.u'))->exists())) {
             try {
                 $context['authentication_results'] = app(ForwardingIngress::class)->authenticationResults($message, $raw);
             } catch (ForwardingCheckFailed $failure) {

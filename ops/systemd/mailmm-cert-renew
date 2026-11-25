@@ -10,9 +10,14 @@ compose() {
 }
 
 status=0
+# Split any reload left pending by an older installed script.
+if [ -f "$state/postfix.pending" ]; then
+    touch "$state/inbound.pending" "$state/outbound.pending"
+    rm "$state/postfix.pending"
+fi
 compose --profile acme run --rm --no-deps -T \
     -v "$state:/renew-state" certbot renew --cert-name mailmm --non-interactive --quiet \
-    --deploy-hook 'touch /renew-state/nginx.pending /renew-state/postfix.pending' || status=$?
+    --deploy-hook 'touch /renew-state/nginx.pending /renew-state/inbound.pending /renew-state/outbound.pending' || status=$?
 
 # Keep each marker until its service has accepted the new certificate configuration.
 if [ -f "$state/nginx.pending" ]; then
@@ -23,14 +28,22 @@ if [ -f "$state/nginx.pending" ]; then
         status=1
     fi
 fi
-if [ -f "$state/postfix.pending" ]; then
-    if compose exec -T smtp postfix reload && {
-        outbound=$(docker ps -aq --filter label=com.docker.compose.project=mailmm --filter label=com.docker.compose.service=outbound) &&
-        { [ -z "$outbound" ] || docker exec "$outbound" postfix reload; }
-    }; then
-        rm "$state/postfix.pending"
+if [ -f "$state/inbound.pending" ]; then
+    if compose exec -T smtp postfix reload; then
+        rm "$state/inbound.pending"
     else
-        echo 'MailMM certificate reload failed for postfix. A retry is pending.' >&2
+        echo 'MailMM certificate reload failed for inbound Postfix. A retry is pending.' >&2
+        status=1
+    fi
+fi
+if [ -f "$state/outbound.pending" ]; then
+    # A stopped relay loads the renewed certificate when it starts.
+    if outbound=$(docker ps -q --filter status=running --filter label=com.docker.compose.project=mailmm \
+        --filter label=com.docker.compose.service=outbound) &&
+        { [ -z "$outbound" ] || docker exec "$outbound" postfix reload; }; then
+        rm "$state/outbound.pending"
+    else
+        echo 'MailMM certificate reload failed for outbound Postfix. A retry is pending.' >&2
         status=1
     fi
 fi

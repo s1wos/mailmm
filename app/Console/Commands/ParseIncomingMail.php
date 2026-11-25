@@ -40,9 +40,9 @@ class ParseIncomingMail extends Command
 
             $recipient = strtolower((string) $this->option('recipient'));
             $bounceDomain = config('forwarding.bounce_domain');
-            $bounce = $fromSpool && $bounceDomain && str_ends_with($recipient, '@'.$bounceDomain)
-                && ! MailboxDomain::where('name', $bounceDomain)->exists();
-            if (! $bounce) {
+            $onBounceDomain = $fromSpool && $bounceDomain !== '' && str_ends_with($recipient, '@'.$bounceDomain);
+            $dedicatedBounce = $onBounceDomain && ! MailboxDomain::where('name', $bounceDomain)->exists();
+            if (! $dedicatedBounce) {
                 ParseIncomingMailRequest::validateRecipient($recipient);
             }
             $stream = $this->input instanceof StreamableInputInterface ? $this->input->getStream() : null;
@@ -55,11 +55,8 @@ class ParseIncomingMail extends Command
                 ? PostfixReceipt::fromMessage($raw, config('mailbox.mx_host'), config('mailbox.previous_mx_hosts'))
                 : null;
             $sender = $this->option('mail-from');
-            if ($bounce) {
-                if ($sender === '<>' || $sender === '') {
-                    ForwardingFeedback::receiveDsn($recipient, $raw);
-                }
-
+            if (($onBounceDomain && ($sender === '<>' || $sender === '') && ForwardingFeedback::receiveDsn($recipient, $raw))
+                || $dedicatedBounce) {
                 return self::SUCCESS;
             }
             $context = $fromSpool

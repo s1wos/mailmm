@@ -25,6 +25,7 @@ test('following the public action on an already open card expands the recipient 
     const html = await card.html()
     assert.match(html, /<input\b(?=[^>]*id="forward")(?=[^>]*name="to")(?=[^>]*inputmode="email")[^>]*>/)
     assert.match(html, /«От кого» получатель увидит адрес исходного отправителя/)
+    assert.match(html, /Если оригинал недоступен, копия придёт с адреса MailMM/)
 })
 
 test('the archive form describes the stored copy and accepts the chosen recipient', async t => {
@@ -32,8 +33,8 @@ test('the archive form describes the stored copy and accepts the chosen recipien
     t.after(card.unmount)
     await card.state.open()
     const html = await card.html()
-    assert.match(html, /«От кого» получатель увидит адрес исходного отправителя/)
-    assert.match(html, /Если его адрес не сохранился, отправителем будет указан MailMM/)
+    assert.match(html, /с адреса MailMM/)
+    assert.match(html, /ответить автору/i)
     assert.match(html, /текст письма и сохранённые вложения/i)
     assert.doesNotMatch(html, /исходным оформлением|встроенными изображениями/)
     t.mock.method(globalThis, 'fetch', async (_path: string, options: RequestInit) => {
@@ -54,6 +55,9 @@ test('a lost POST response keeps its UUID across a reload and only the initiatin
     t.after(() => { Reflect.deleteProperty(globalThis, 'window') })
     const sent: { to: string, request_id: string }[] = []
     t.mock.method(globalThis, 'fetch', async (path: string, options: RequestInit) => {
+        if (path === '/admin/messages/42/forwards?ids%5B%5D=f1') {
+            return Response.json({ forwards: [{ ...operation, request_id: sent[0].request_id }] })
+        }
         assert.equal(path, '/admin/messages/42/forwards')
         assert.equal(options.method, 'POST')
         const body = JSON.parse(String(options.body))
@@ -83,20 +87,58 @@ test('a lost POST response keeps its UUID across a reload and only the initiatin
     assert.match(await recovered.html(), /В очереди/)
 })
 
-test('polling a saved pending operation identifies the viewer and stops after acceptance', async t => {
+test('a new forward checks status immediately and returns to normal polling after a short window', async t => {
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'] })
+    const requests: string[] = []
+    t.mock.method(globalThis, 'fetch', async (path: string, options: RequestInit) => {
+        if (options.method === 'POST') return Response.json({ forward: operation }, { status: 202 })
+        requests.push(path)
+        return Response.json({ forwards: [{ ...operation, status: requests.length === 6 ? 'accepted' : 'preparing' }] })
+    })
+    const card = await mount(page)
+    t.after(card.unmount)
+    card.state.to.value = operation.destination
+    await card.state.send()
+    await flush()
+    assert.deepEqual(requests, ['/admin/messages/42/forwards?ids%5B%5D=f1'])
+    assert.match(await card.html(), /Подготовка письма/)
+
+    for (let i = 0; i < 4; i++) {
+        t.mock.timers.tick(500)
+        await flush()
+    }
+    assert.equal(requests.length, 5)
+
+    t.mock.timers.tick(4_999)
+    await flush()
+    assert.equal(requests.length, 5)
+    t.mock.timers.tick(1)
+    await flush()
+    assert.equal(requests.length, 6)
+    assert.match(await card.html(), /Передано почтовому серверу/)
+})
+
+test('one poll refreshes several pending operations without retrying a disappeared operation', async t => {
     t.mock.timers.enable({ apis: ['setTimeout'] })
     const requests: string[] = []
+    const missing = { ...operation, id: 'f2', destination: 'missing@example.test', status: 'preparing' }
+    const automatic = { ...operation, id: 'f3', mode: 'auto', status: 'submitting' }
+    const terminal = { ...operation, id: 'f4', status: 'failed' }
     t.mock.method(globalThis, 'fetch', async (path: string, options: RequestInit) => {
         requests.push(path)
         assert.equal(new Headers(options.headers).get('X-Panel-User'), '17')
-        return Response.json({ forward: { ...operation, status: 'accepted' } })
+        return Response.json({ forwards: [{ ...operation, status: 'accepted' }, { ...automatic, status: 'cancelled' }] })
     })
-    const card = await mount({ ...page, initialForwards: [operation] })
+    const card = await mount({ ...page, initialForwards: [operation, missing, automatic, terminal] })
     t.after(card.unmount)
     t.mock.timers.tick(10_000)
     await flush()
-    assert.deepEqual(requests, ['/admin/messages/42/forwards/f1'])
-    assert.match(await card.html(), /Передано почтовому серверу/)
+    assert.deepEqual(requests, ['/admin/messages/42/forwards?ids%5B%5D=f1&ids%5B%5D=f2&ids%5B%5D=f3'])
+    const html = await card.html()
+    assert.match(html, /Передано почтовому серверу/)
+    assert.match(html, /Отменено/)
+    assert.match(html, /Ошибка отправки/)
+    assert.doesNotMatch(html, /missing@example\.test|Не удалось обновить статус/)
     t.mock.timers.tick(10_000)
     await flush()
     assert.equal(requests.length, 1)

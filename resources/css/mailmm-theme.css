@@ -17,6 +17,17 @@
     font-synthesis: none;
 }
 
+@media (forced-colors: none) {
+    :focus-visible { outline: none; }
+}
+
+:is(a, button, summary):focus-visible,
+h2:target:focus-visible,
+main:target:focus-visible h1 {
+    text-decoration: underline;
+    text-underline-offset: .2em;
+}
+
 .brand::before, .wordmark::before {
     content: "";
     flex: none;

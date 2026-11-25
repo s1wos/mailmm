@@ -467,6 +467,118 @@ test('refreshes expanded pages when a delayed letter arrives below the first pag
     assert.equal(store.nextCursor, null)
 })
 
+test('an HTTP refresh resumes a burst from its old snapshot and applies it atomically', async t => {
+    const item = (id: number) => ({ ...message, id })
+    const changed = (ids: number[], cursor: string | null) => Response.json(
+        { data: ids.map(item), meta: { next_cursor: cursor, delta: true } },
+        { headers: { 'X-Mailbox-Id': String(first.id), 'X-Inbox-Snapshot': 'target' } },
+    )
+    const requests: [string, string | null, string | null][] = []
+    let delivered = false
+    let online = false
+    t.mock.method(globalThis, 'fetch', async (url: string, options: RequestInit) => {
+        const headers = new Headers(options.headers)
+        requests.push([url, headers.get('X-Inbox-Since'), headers.get('X-Inbox-Until')])
+        if (url === '/api/email') return address(first, delivered ? 'target' : 'saved')
+        if (url === '/api/messages?cursor=change') {
+            if (!online) throw new TypeError('Failed to fetch')
+            return changed([4], null)
+        }
+        if (url === '/api/messages?cursor=history') return list(first.id, [item(1)])
+        return delivered ? changed([5], 'change') : list(first.id, [item(3), item(2)], 'history')
+    })
+    const store = useEmailStore()
+    await store.refresh()
+    await store.loadMore()
+    delivered = true
+    await store.refresh()
+    assert.deepEqual(store.messages.map(m => m.id), [3, 2, 1])
+    online = true
+    requests.length = 0
+    await store.refresh()
+    assert.deepEqual(requests, [
+        ['/api/email', null, null],
+        ['/api/messages', 'saved', null],
+        ['/api/messages?cursor=change', 'saved', 'target'],
+    ])
+    assert.deepEqual(store.messages.map(m => m.id), [5, 4, 3, 2, 1])
+})
+
+test('an in-flight HTTP delta uses server time when the device clock jumps', async t => {
+    const serverTime = '2026-01-01T00:00:00Z'
+    const item = (id: number) => ({ ...message, id, received_at: serverTime, expires_at: '2026-01-03T00:00:00Z' })
+    let wall = Date.parse(serverTime)
+    t.mock.method(Date, 'now', () => wall)
+    const pendingDelta = Promise.withResolvers<Response>()
+    const started = Promise.withResolvers<void>()
+    let delivered = false
+    t.mock.method(globalThis, 'fetch', async (url: string) => {
+        if (url === '/api/email') return Response.json({ data: first }, { headers: {
+            'X-Inbox-Snapshot': delivered ? 'after' : 'before', 'X-Server-Time': serverTime,
+        } })
+        if (url === '/api/messages?cursor=older') return list(first.id, [item(4), item(3)])
+        if (delivered) {
+            started.resolve()
+            return pendingDelta.promise
+        }
+        return list(first.id, [item(6), item(5)], 'older')
+    })
+    const store = useEmailStore()
+    await store.refresh()
+    await store.loadMore()
+    delivered = true
+    const refreshing = store.refresh()
+    await started.promise
+    wall += 366 * 86400000
+    pendingDelta.resolve(Response.json({ data: [item(7)], meta: { next_cursor: null, delta: true } }, {
+        headers: { 'X-Mailbox-Id': String(first.id), 'X-Inbox-Snapshot': 'after' },
+    }))
+    await refreshing
+    assert.deepEqual(store.messages.map(row => row.id), [7, 6, 5, 4, 3])
+})
+
+test('normal expiry preserves the revision of a 300-letter inbox for the next delivery', async t => {
+    const deadline = Date.parse('2026-01-02T00:00:00Z')
+    let wall = deadline - 1000
+    let monotonic = 1000
+    t.mock.method(Date, 'now', () => wall)
+    t.mock.method(performance, 'now', () => monotonic)
+    const item = (id: number) => ({ ...message, id, expires_at: id <= 3 ? new Date(deadline).toISOString() : message.expires_at })
+    let delivered = false
+    const requests: string[] = []
+    t.mock.method(globalThis, 'fetch', async (url: string, options: RequestInit) => {
+        requests.push(url)
+        if (url === '/api/email') return Response.json({ data: first }, { headers: {
+            'X-Inbox-Snapshot': delivered ? 'after' : 'before', 'X-Server-Time': new Date(wall).toISOString(),
+        } })
+        if (delivered) {
+            assert.equal(new Headers(options.headers).get('X-Inbox-Since'), 'before')
+            return Response.json({ data: [item(303)], meta: { next_cursor: null, delta: true } }, {
+                headers: { 'X-Mailbox-Id': String(first.id), 'X-Inbox-Snapshot': 'after' },
+            })
+        }
+        const position = Number(new URL(url, 'http://mail.test').searchParams.get('cursor') ?? 0)
+        return list(first.id, Array.from({ length: 30 }, (_, i) => item(302 - position - i)), String(position + 30))
+    })
+    const store = useEmailStore()
+    await store.refresh()
+    for (let page = 1; page < 10; page++) await store.loadMore()
+    assert.equal(store.messages.length, 300)
+    assert.equal(store.nextCursor, '300')
+    wall += 1000
+    monotonic += 1000
+    assert.equal(store.expire(store.serverNow()), false)
+    assert.equal(store.messages.length, 299)
+    assert.equal(store.nextCursor, null)
+    delivered = true
+    requests.length = 0
+    await store.refresh()
+    assert.deepEqual(requests, ['/api/email', '/api/messages'])
+    assert.equal(store.messages.length, 300)
+    assert.equal(store.messages[0].id, 303)
+    assert.equal(store.messages.at(-1)?.id, 4)
+})
+
 test('checking an unchanged 100-page inbox keeps the open letter without rereading the pages', async (t) => {
     const requests: string[] = []
     t.mock.method(globalThis, 'fetch', async (url: string) => {
@@ -519,6 +631,66 @@ test('a fresh server clock restores retained mail after a forward jump of the de
     assert.deepEqual(store.messages, [])
     await store.refresh()
     assert.deepEqual(store.messages, [letter])
+})
+
+test('a fresh server clock restores the expanded boundary after a device clock jump', async t => {
+    const serverTime = '2026-01-01T00:00:00Z'
+    const letter = { ...message, received_at: serverTime, expires_at: '2026-01-03T00:00:00Z' }
+    const older = { ...letter, id: letter.id - 1, received_at: '2025-12-31T00:00:00Z' }
+    let wall = Date.parse(serverTime)
+    t.mock.method(Date, 'now', () => wall)
+    t.mock.method(performance, 'now', () => 1000)
+    t.mock.method(globalThis, 'fetch', async (url: string) => {
+        if (url === '/api/email') return Response.json({ data: first }, {
+            headers: { 'X-Server-Time': serverTime, 'X-Inbox-Snapshot': 'unchanged' },
+        })
+        if (url === '/api/messages?cursor=older') return list(first.id, [older], 'remaining')
+        return list(first.id, [letter], 'older')
+    })
+    const store = useEmailStore()
+    await store.refresh()
+    await store.loadMore()
+    wall += 366 * 86400000
+    assert.equal(store.expire(store.serverNow()), false)
+    assert.deepEqual(store.messages, [])
+
+    await store.refresh()
+    assert.deepEqual(store.messages, [letter, older])
+    assert.equal(store.nextCursor, 'remaining')
+})
+
+test('a historical page in flight advances the restored boundary after a device clock jump', async t => {
+    const serverTime = '2026-01-01T00:00:00Z'
+    const item = (id: number) => ({ ...message, id, received_at: serverTime, expires_at: '2026-01-03T00:00:00Z' })
+    let wall = Date.parse(serverTime)
+    t.mock.method(Date, 'now', () => wall)
+    const pendingPage = Promise.withResolvers<Response>()
+    let delivered = false
+    t.mock.method(globalThis, 'fetch', async (url: string) => {
+        if (url === '/api/email') return Response.json({ data: first }, { headers: {
+            'X-Inbox-Snapshot': delivered ? 'after' : 'before', 'X-Server-Time': serverTime,
+        } })
+        const cursor = new URL(url, 'http://mail.test').searchParams.get('cursor')
+        if (cursor === '5' && !delivered) return pendingPage.promise
+        const firstId = cursor ? Number(cursor) - 1 : delivered ? 9 : 8
+        const rows = [item(firstId), item(firstId - 1)]
+        return list(first.id, rows, firstId > 2 ? String(firstId - 1) : null)
+    })
+    const store = useEmailStore()
+    await store.refresh()
+    await store.loadMore()
+    const loading = store.loadMore()
+    wall += 366 * 86400000
+    assert.equal(store.expire(store.serverNow()), false)
+    assert.deepEqual(store.messages, [])
+    pendingPage.resolve(list(first.id, [item(4), item(3)], '3'))
+    await loading
+    assert.equal(store.nextCursor, '3')
+
+    delivered = true
+    await store.refresh()
+    assert.deepEqual(store.messages.map(row => row.id), [9, 8, 7, 6, 5, 4, 3])
+    assert.equal(store.nextCursor, '3')
 })
 
 test('keeps an issued mailbox accessible and explains the pause after a rejected rotation', async (t) => {

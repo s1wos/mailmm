@@ -24,8 +24,16 @@ class MessageController extends Controller
         // Recover the guest session even when the requested page is invalid.
         $cursor = Cursor::fromEncoded(app(MailboxPageRequest::class)->validated('cursor'));
 
-        return response()->json($inbox->page($email, $cursor))
+        $since = $request->header('X-Inbox-Since');
+        $through = $request->header('X-Inbox-Until');
+        $snapshot = $email && is_string($since) && strlen($since) <= 100 && ($cursor === null || $through !== null)
+            ? ($through ?? $inbox->snapshot($email)) : null;
+        $delta = is_string($snapshot) && strlen($snapshot) <= 100 ? $inbox->delta($email, $since, $snapshot, $cursor) : null;
+        abort_if($through !== null && $delta === null, 422);
+        $response = response()->json($delta ?? $inbox->page($email, $cursor))
             ->header('X-Mailbox-Id', (string) ($email?->id ?? 0));
+
+        return $snapshot === null ? $response : $response->header('X-Inbox-Snapshot', $snapshot);
     }
 
     public function show(Request $request, int $message): JsonResponse

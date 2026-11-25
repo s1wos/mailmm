@@ -76,21 +76,73 @@ async function login(page, url, credentials) {
     await page.getByLabel('Электронная почта').fill(credentials.email)
     await page.getByLabel('Пароль').fill(credentials.password)
     await page.getByRole('button', { name: 'Войти' }).click()
-    await expect(page.getByRole('link', { name: 'Открыть почту' }).first()).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Открыть почту' }).first()).toBeVisible({ timeout: 15_000 })
 }
 
 // Warm the disposable proxy cache so the real authenticated image route can serve an
 // offline sender. The browser must never try to contact that sender directly.
 function cacheTestImage(stack, url, mime, bytes) {
-    stack.compose(['exec', '-T', '-u', 'www-data', 'app', 'php', '-r',
+    return stack.compose(['exec', '-T', '-u', 'www-data', 'app', 'php', '-r',
         `require 'vendor/autoload.php';
          $app = require 'bootstrap/app.php';
          $app->make(Illuminate\\Contracts\\Console\\Kernel::class)->bootstrap();
          $digest = hash('sha256', $argv[1]);
-         Illuminate\\Support\\Facades\\Cache::store('file')->put('mail-image:'.(hexdec(substr($digest, 0, 2)) % 64),
-             ['digest' => $digest, 'image' => ['mime' => $argv[2], 'bytes' => base64_decode($argv[3])]], 120);`,
-        '--', url, mime, bytes.toString('base64')])
+         $cache = Illuminate\\Support\\Facades\\Cache::store('file');
+         $key = 'mail-image:'.(hexdec(substr($digest, 0, 2)) % 64);
+         $cache->put($key, ['digest' => $digest, 'image' => ['mime' => $argv[2], 'bytes' => base64_decode($argv[3])]], 120);
+         echo $cache->getStore()->path($key);`,
+        '--', url, mime, bytes.toString('base64')]).trim()
 }
+
+test('blocked image requests occupy only the image pool and leave the inbox API responsive', async ({ page, stack }) => {
+    const imageUrl = 'https://shop.example.test/pool-test.gif'
+    const cachePath = cacheTestImage(stack, imageUrl, 'image/gif', Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==', 'base64'))
+    await openRealtimeMailbox(page, stack.url)
+    const recipient = await page.locator('.address-value').textContent()
+    await deliver(stack.smtp, recipient, { subject: 'Image pool test', html: `<img src="${imageUrl}">` })
+    await expect(page.getByRole('button', { name: /Image pool test/ })).toBeVisible()
+    const id = stack.sql("SELECT id FROM messages WHERE subject = 'Image pool test'", ['-At']).trim()
+    const preview = await (await page.request.get(`${stack.url}/api/messages/${id}`)).json()
+    const proxyPath = preview.data.html_preview.match(/\/mail-images\/\d+\/[A-Za-z0-9_-]+/)[0]
+
+    // Hold cache reads at a deterministic point inside the FPM request, without contacting an external host.
+    const signal = '/tmp/mailmm-image-pool-' + randomUUID()
+    const app = (script, ...args) => stack.compose(['exec', '-T', '-u', 'www-data', 'app', 'php', '-r', script, '--', ...args])
+    stack.compose(['exec', '-d', '-T', '-u', 'www-data', 'app', 'php', '-r', `
+        $file = fopen($argv[1], 'rb');
+        if (!$file || !flock($file, LOCK_EX)) exit(1);
+        touch($argv[2].'.ready');
+        $deadline = microtime(true) + 30;
+        while (microtime(true) < $deadline && !file_exists($argv[2].'.release')) usleep(50000);
+        fclose($file);`, '--', cachePath, signal])
+    let images
+    try {
+        await expect.poll(() => app('echo (int) file_exists($argv[1].".ready");', signal)).toBe('1')
+        images = Promise.allSettled(Array.from({ length: 3 }, () => page.request.get(stack.url + proxyPath, { timeout: 18_000 })))
+        const snapshot = () => JSON.parse(app(String.raw`
+            $inode = fileinode($argv[1]);
+            $pools = static function () use ($inode): array {
+                $blocked = [];
+                foreach (file('/proc/locks') as $line) {
+                    if (preg_match('/-> FLOCK\s+ADVISORY\s+READ\s+(\d+)\s+\S+:'.$inode.'\s/', $line, $match)) {
+                        $name = @file_get_contents('/proc/'.$match[1].'/cmdline');
+                        if ($name !== false) $blocked[] = trim(str_replace("\0", '', $name));
+                    }
+                }
+                return $blocked;
+            };
+            $before = $pools();
+            $inbox = count($before) === 3 ? @file_get_contents('http://nginx/api/messages', false,
+                stream_context_create(['http' => ['timeout' => 3]])) : false;
+            echo json_encode(['before' => $before, 'after' => $pools(),
+                'inboxResponded' => is_array(json_decode((string) $inbox, true)['data'] ?? null)]);`, cachePath))
+        const imageWorkers = Array(3).fill('php-fpm: pool mail-images')
+        await expect.poll(snapshot, { timeout: 9_000 }).toEqual({ before: imageWorkers, after: imageWorkers, inboxResponded: true })
+    } finally {
+        app('touch($argv[1].".release");', signal)
+        await images
+    }
+})
 
 test('formatted mail keeps the sender’s layout and opens its links in both readers', async ({ page, context, stack }) => {
     await openRealtimeMailbox(page, stack.url)
@@ -386,11 +438,11 @@ for (const width of [390, 1280]) {
     })
 }
 
-test('a manual check keeps an expanded inbox and reads every required page through the socket', async ({ page, stack }) => {
+test('a manual check adds a letter to an expanded inbox in one socket reply', async ({ page, stack }) => {
     const trace = await traceMailbox(page)
     await openRealtimeMailbox(page, stack.url)
     const email = await page.locator('.address-value').textContent()
-    stack.seedInbox(email, 35, 'Initial letter')
+    stack.seedInbox(email, 330, 'Initial letter')
     const check = page.locator('.check-mail')
     await page.evaluate(() => {
         Object.defineProperty(document, 'hidden', { configurable: true, value: true })
@@ -399,17 +451,23 @@ test('a manual check keeps an expanded inbox and reads every required page throu
         document.dispatchEvent(new Event('visibilitychange'))
     })
     await check.click()
-    await expect(page.locator('.letter-list button')).toHaveCount(30)
-    await page.getByRole('button', { name: 'Показать ещё' }).click()
-    await expect(page.locator('.letter-list button')).toHaveCount(35)
+    const letters = page.locator('.letter-list button')
+    const more = page.getByRole('button', { name: 'Показать ещё' })
+    await expect(letters).toHaveCount(30)
+    for (let count = 60; count <= 300; count += 30) {
+        await more.click()
+        await expect(letters).toHaveCount(count)
+    }
     stack.seedInbox(email, 1, 'Newer letter')
     trace.http.length = 0
     trace.sent.length = 0
     await check.click({ timeout: 9_000 })
-    await expect(page.locator('.letter-list button')).toHaveCount(36)
+    await expect(letters).toHaveCount(301)
     expect(trace.sent.filter(f => f.event === 'mailbox.check')).toHaveLength(1)
-    expect(trace.sent.filter(f => f.event === 'mailbox.page')).toHaveLength(1)
+    expect(trace.sent.filter(f => f.event === 'mailbox.page')).toHaveLength(0)
     expect(trace.http).toEqual([])
+    await more.click()
+    await expect(letters).toHaveCount(331)
 })
 
 test('a shared manual limit and a revoked mailbox both respond over the socket without HTTP', async ({ page, context, stack }) => {
@@ -499,6 +557,41 @@ test('an administrator can check and copy again immediately on the public mailbo
     expect(await page.evaluate(() => window.copies)).toBe(2)
 })
 
+test('a permanent mailbox owner can save and cancel a forwarding address while sending is paused', async ({ browser, page, stack }) => {
+    await login(page, stack.url, stack.admin)
+    await page.goto(stack.url + '/admin/mailboxes')
+    await page.getByLabel('Имя до @').fill('paused-forward-owner')
+    await page.getByRole('button', { name: 'Создать ящик' }).click()
+    const credentials = page.locator('.credentials code')
+    await expect(credentials).toHaveCount(2)
+    const [email, password] = await credentials.allTextContents()
+    const owner = await browser.newPage()
+    try {
+        await login(owner, stack.url, { email, password })
+        await openRealtimeMailbox(owner, stack.url)
+        await owner.getByRole('link', { name: 'Автопересылка' }).click()
+        const rule = owner.getByRole('region', { name: 'Автопересылка' })
+        await rule.getByRole('button', { name: 'Настроить' }).click()
+        const destination = 'paused-owner@reader.test'
+        await rule.getByLabel('Адрес назначения').fill(destination)
+        await rule.getByLabel('Текущий пароль').fill(password)
+        await rule.getByRole('button', { name: 'Сохранить адрес' }).click()
+        await expect(rule.getByText('Адрес сохранён', { exact: true })).toBeVisible()
+
+        await owner.reload()
+        await expect(rule.getByRole('status').filter({ hasText: destination })).toContainText('Адрес сохранён')
+        await expect(rule.getByText(/Когда отправка станет доступна, запросите код/)).toBeVisible()
+        await expect(rule.getByLabel('Код из письма')).toHaveCount(0)
+        await expect(rule.getByRole('button', { name: 'Получить код' })).toHaveCount(0)
+        await rule.getByRole('button', { name: 'Отменить' }).click()
+        await expect(rule.getByText('Выключена', { exact: true })).toBeVisible()
+        await owner.reload()
+        await expect(rule.getByRole('button', { name: 'Настроить' })).toBeVisible()
+    } finally {
+        await owner.close()
+    }
+})
+
 test('a permanent mailbox owner is limited and their open letter disappears after a password reset', async ({ browser, page, stack }) => {
     const ownerContext = await browser.newContext()
     const renewedContext = await browser.newContext()
@@ -544,7 +637,12 @@ test('a permanent mailbox owner is limited and their open letter disappears afte
         const cachedLetter = disconnected.getByRole('button', { name: /Owner mailbox test/ })
         await cachedLetter.click()
         const cachedBody = disconnected.getByText('Private text in the owner browser', { exact: true })
-        await expect(cachedBody).toBeVisible()
+        const retryCachedLetter = disconnected.getByRole('button', { name: 'Повторить загрузку письма' })
+        await expect(async () => {
+            // Opening this letter in the owner tab shares its cooldown with this tab.
+            if (await retryCachedLetter.isVisible()) await retryCachedLetter.click()
+            await expect(cachedBody).toBeVisible({ timeout: 750 })
+        }).toPass({ intervals: [1000], timeout: 8000 })
         requests.length = 0
         paused = true
         await Promise.all([activeConnection.client.close({ code: 4200 }), activeConnection.server.close({ code: 4200 })])
@@ -553,41 +651,6 @@ test('a permanent mailbox owner is limited and their open letter disappears afte
         await check.click()
         await expect(check).toContainText('Проверено')
         await check.evaluate(el => el.click())
-test('a permanent mailbox owner can save and cancel a forwarding address while sending is paused', async ({ browser, page, stack }) => {
-    await login(page, stack.url, stack.admin)
-    await page.goto(stack.url + '/admin/mailboxes')
-    await page.getByLabel('Имя до @').fill('paused-forward-owner')
-    await page.getByRole('button', { name: 'Создать ящик' }).click()
-    const credentials = page.locator('.credentials code')
-    await expect(credentials).toHaveCount(2)
-    const [email, password] = await credentials.allTextContents()
-    const owner = await browser.newPage()
-    try {
-        await login(owner, stack.url, { email, password })
-        await openRealtimeMailbox(owner, stack.url)
-        await owner.getByRole('link', { name: 'Автопересылка' }).click()
-        const rule = owner.getByRole('region', { name: 'Автопересылка' })
-        await rule.getByRole('button', { name: 'Настроить' }).click()
-        const destination = 'paused-owner@reader.test'
-        await rule.getByLabel('Адрес назначения').fill(destination)
-        await rule.getByLabel('Текущий пароль').fill(password)
-        await rule.getByRole('button', { name: 'Сохранить адрес' }).click()
-        await expect(rule.getByText('Адрес сохранён', { exact: true })).toBeVisible()
-
-        await owner.reload()
-        await expect(rule.getByRole('status').filter({ hasText: destination })).toContainText('Адрес сохранён')
-        await expect(rule.getByText(/Когда отправка станет доступна, запросите код/)).toBeVisible()
-        await expect(rule.getByLabel('Код из письма')).toHaveCount(0)
-        await expect(rule.getByRole('button', { name: 'Получить код' })).toHaveCount(0)
-        await rule.getByRole('button', { name: 'Отменить' }).click()
-        await expect(rule.getByText('Выключена', { exact: true })).toBeVisible()
-        await owner.reload()
-        await expect(rule.getByRole('button', { name: 'Настроить' })).toBeVisible()
-    } finally {
-        await owner.close()
-    }
-})
-
         expect(trace.sent.filter(frame => frame.reason === 'manual')).toHaveLength(1)
         trace.http.length = 0
         const box = page.locator('.box-list li').filter({ hasText: email })
@@ -1122,7 +1185,7 @@ test('changing the administrator password stays at the form and permits another 
     }
 })
 
-test('reloading settings only shows a focus outline after keyboard navigation', async ({ page, stack }) => {
+test('keyboard navigation in settings shows focus without an outer ring', async ({ page, stack }) => {
     await page.goto(stack.url + '/admin/settings')
     await page.getByLabel('Электронная почта').fill(stack.admin.email)
     await page.getByLabel('Пароль').fill(stack.admin.password)
@@ -1137,10 +1200,14 @@ test('reloading settings only shows a focus outline after keyboard navigation', 
     await expect(main).toHaveCSS('outline-style', 'none')
 
     await page.keyboard.press('Tab')
-    await expect(main.locator(':focus-visible')).toHaveCSS('outline-style', 'solid')
+    const archive = main.getByRole('link', { name: 'архиве' })
+    await expect(archive).toBeFocused()
+    await expect(archive).toHaveCSS('outline-style', 'none')
+    await expect(archive).toHaveCSS('text-decoration-line', 'underline')
     await page.getByRole('link', { name: 'К содержимому' }).press('Enter')
     await expect(main).toBeFocused()
-    await expect(main).toHaveCSS('outline-style', 'solid')
+    await expect(main).toHaveCSS('outline-style', 'none')
+    await expect(heading).toHaveCSS('text-decoration-line', 'underline')
 })
 
 test('both copy controls share one pending operation and keyboard activation works after feedback', async ({ page, stack }) => {
@@ -1390,7 +1457,8 @@ test('a quota warning disappears automatically and can be closed on the next att
     await changeAddress.click()
     await confirm.click()
     await expect(warning).toBeVisible()
-    await page.getByRole('button', { name: 'Закрыть предупреждение' }).click()
+    await page.locator('.mailbox-warning').filter({ has: warning })
+        .getByRole('button', { name: 'Закрыть предупреждение' }).click()
     await expect(warning).toBeHidden({ timeout: 1000 })
 })
 

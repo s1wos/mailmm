@@ -22,18 +22,19 @@ async function render(screen: string, page: object, url: string) {
     return renderToString(createSSRApp(component, { page }).use(router))
 }
 
-test('a filtered archive keeps the recipient and page when opening a letter and paging', async () => {
+test('a filtered archive keeps the recipient and cursor when opening a letter and paging', async () => {
     const html = await render('Archive', {
         user: admin, recipient: letter.recipient,
-        listQuery: { recipient: letter.recipient, page: 2 },
+        listQuery: { recipient: letter.recipient, page: 2, cursor: 'current-page' },
         messages: {
             data: [letter], current_page: 2, last_page: 3, total: 60,
-            prev_page_url: '/admin/archive?recipient=owner%40example.test&page=1',
-            next_page_url: '/admin/archive?recipient=owner%40example.test&page=3',
+            prev_page_url: '/admin/archive?recipient=owner%40example.test&cursor=previous-page',
+            next_page_url: '/admin/archive?recipient=owner%40example.test&page=3&cursor=next-page',
         },
-    }, '/admin/archive?recipient=owner@example.test&page=2')
-    assert.match(html, /href="\/admin\/messages\/37\?recipient=owner@example\.test&amp;page=2"/)
-    assert.match(html, /href="\/admin\/archive\?recipient=owner@example\.test&amp;page=3"/)
+    }, '/admin/archive?recipient=owner@example.test&page=2&cursor=current-page')
+    assert.match(html, /href="\/admin\/messages\/37\?recipient=owner@example\.test&amp;page=2&amp;cursor=current-page"/)
+    assert.match(html, /href="\/admin\/archive\?recipient=owner@example\.test&amp;cursor=previous-page"/)
+    assert.match(html, /href="\/admin\/archive\?recipient=owner@example\.test&amp;page=3&amp;cursor=next-page"/)
     assert.match(html, /Без темы/)
     assert.match(html, /Отправитель не указан/)
     assert.match(html, /19\.11\.2026, 23:59/)
@@ -139,4 +140,21 @@ test('only the owner sees the pending rule, its destination and confirmation con
     assert.match(activePaused, /Отправка приостановлена/)
     assert.doesNotMatch(activePaused, /Включена/)
     assert.match(activePaused, /Выключить/)
+})
+
+test('an active forwarding rule distinguishes its recorded warning from the current status', async () => {
+    const page = {
+        user: owner, recipient: '', listQuery: {}, serverTime: '2026-11-20T00:00:00Z',
+        forwarding: { status: 'active', sending_enabled: true, version: 7, destination: 'confirm@example.test',
+            activated_at: '2026-11-19T00:00:00Z', code_expires_at: null, resend_at: null, disabled_reason: null,
+            last_error_code: 'smtp_temporary' },
+        messages: { data: [], current_page: 1, last_page: 1, total: 0, prev_page_url: null, next_page_url: null },
+    }
+    const html = await render('Archive', page, '/admin')
+    assert.match(html, /<strong\b[^>]*>Включена<\/strong>/)
+    assert.match(html, /class="hint"[^>]*>Последнее предупреждение об отправке\. Почтовый сервер временно недоступен\./)
+
+    const disabled = await render('Archive', { ...page, forwarding: { ...page.forwarding, status: 'disabled',
+        disabled_reason: 'mailbox_closed' } }, '/admin')
+    assert.match(disabled, /class="error"[^>]*>Ящик закрыт\./)
 })

@@ -111,6 +111,8 @@ services:
   reverb:
     <<: *runtime
     user: www-data
+    ulimits:
+      nofile: 8192
     command: ["php", "artisan", "reverb:start", "--host=0.0.0.0", "--port=8080"]
     healthcheck:
       test: ["CMD", "php", "-r", "exit(@file_get_contents('http://127.0.0.1:8080/up') === false ? 1 : 0);"]
@@ -132,7 +134,7 @@ services:
       FORWARD_MANUAL_DSN: ${FORWARD_MANUAL_DSN:-}
       FORWARD_AUTO_DSN: ${FORWARD_AUTO_DSN:-}
       FORWARD_SMTP_TIMEOUT: ${FORWARD_SMTP_TIMEOUT:-15}
-    command: ["php", "artisan", "queue:work", "forwarding", "--queue=forwarding", "--sleep=1", "--timeout=60"]
+    command: ["php", "artisan", "mail:work-forwards"]
 
   forward-filter:
     image: rspamd/rspamd:3.14.1
@@ -218,6 +220,8 @@ services:
       context: .
       target: web
     restart: unless-stopped
+    ulimits:
+      nofile: 8192
     depends_on:
       app:
         condition: service_started

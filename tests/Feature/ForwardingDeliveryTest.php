@@ -2,8 +2,10 @@
 
 namespace Tests\Feature;
 
+use App\Exceptions\ForwardingCheckFailed;
 use App\Exceptions\ForwardingFailure;
 use App\Jobs\SendMailForward;
+use App\Models\MailboxDomain;
 use App\Models\MailboxForwardingRule;
 use App\Models\MailForward;
 use App\Models\Message;
@@ -13,15 +15,19 @@ use App\Services\ForwardingFeedback;
 use App\Services\ForwardingIngress;
 use App\Services\ForwardingMarker;
 use App\Services\ForwardingTransport;
+use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Log\Events\MessageLogged;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Symfony\Component\Console\Input\ArrayInput;
+use Symfony\Component\Console\Output\BufferedOutput;
 use Symfony\Component\Process\Process;
 use Tests\TestCase;
 use ZBateson\MailMimeParser\MailMimeParser;
@@ -117,6 +123,51 @@ class ForwardingDeliveryTest extends TestCase
         return [['corrupt', 'original_corrupt'], ['revoked', 'access_revoked'], ['expired', 'delivery_expired']];
     }
 
+    public static function forwardingModes(): array
+    {
+        return [['manual'], ['auto']];
+    }
+
+    #[DataProvider('forwardingModes')]
+    public function test_worker_does_not_reattribute_saved_authentication_after_mx_changes(string $mode): void
+    {
+        config(['forwarding.authserv_id' => 'new-mx.mailmm.test']);
+        Http::fake();
+        $op = $this->operation($mode);
+        $this->mock(ForwardingTransport::class)->shouldReceive('send')->once()->andReturnUsing(function ($profile, $mail) {
+            $this->assertSame('auto', $profile);
+            $this->assertStringContainsString("Authentication-Results: new-mx.mailmm.test; none\r\n", $mail->toString());
+            $this->assertStringNotContainsString('dkim=pass', $mail->toString());
+        });
+
+        app(ForwardingDelivery::class)->send($op->id);
+
+        $this->assertSame('accepted', $op->fresh()->status);
+        $this->assertSame('mx.mailmm.test; dkim=pass', $this->message->fresh()->forwarding_context['authentication_results']);
+        Http::assertNothingSent();
+    }
+
+    #[DataProvider('forwardingModes')]
+    public function test_worker_does_not_submit_when_bounce_domain_is_already_a_mailbox_domain(string $mode): void
+    {
+        MailboxDomain::create(['name' => config('forwarding.bounce_domain')]);
+        $op = $this->operation($mode);
+        $this->mock(ForwardingTransport::class)->shouldNotReceive('send');
+
+        app(ForwardingDelivery::class)->send($op->id);
+
+        $this->assertSame('failed', $op->fresh()->status);
+        $this->assertSame('bounce_domain_conflict', $op->fresh()->error_code);
+    }
+
+    public function test_bounce_configuration_uses_the_canonical_domain(): void
+    {
+        $php = 'require "vendor/autoload.php"; echo (require "config/forwarding.php")["bounce_domain"];';
+        $process = new Process([PHP_BINARY, '-r', $php], base_path(), ['FORWARD_BOUNCE_DOMAIN' => 'BOUNCE.TEST.']);
+
+        $this->assertSame('bounce.test', $process->mustRun()->getOutput());
+    }
+
     #[DataProvider('evidence')]
     public function test_worker_checks_source_and_current_authority_before_smtp(string $problem, string $reason): void
     {
@@ -133,8 +184,8 @@ class ForwardingDeliveryTest extends TestCase
 
     public function test_manual_archive_keeps_stored_html_text_and_legacy_binary_attachment(): void
     {
-        $this->message->update(['raw_path' => null, 'raw_sha256' => null, 'raw_size' => null,
-            'body_text' => 'Сохранённый текст', 'body_html' => '<p><b>Сохранённая вёрстка</b></p>']);
+        $this->message->update(['raw_path' => null, 'raw_sha256' => null, 'raw_size' => null, 'from' => 'shop&sales@sender.test',
+            'body_text' => 'Сохранённый текст', 'body_html' => '<html><body><p><b>Сохранённая вёрстка</b></p></body></html>']);
         $name = '2025/письма\чек.pdf';
         $path = "emails/{$this->message->id}/".$name;
         $bytes = "\0PDF\xff";
@@ -142,19 +193,23 @@ class ForwardingDeliveryTest extends TestCase
         $this->message->update(['attachments' => [['filename' => $name, 'path' => $path,
             'mime' => 'application/pdf', 'size' => strlen($bytes)]]]);
         $op = $this->operation();
-        $this->mock(ForwardingTransport::class)->shouldReceive('send')->once()->andReturnUsing(function ($mode, $message) use ($bytes) {
+        $this->mock(ForwardingTransport::class)->shouldReceive('send')->once()->andReturnUsing(function ($profile, $message, $destination, $bounce) use ($bytes, $op) {
             $wire = $message->toString();
+            $this->assertSame('manual', $profile);
+            $this->assertSame('reader@outside.test', $destination);
+            $this->assertSame(ForwardingFeedback::address($op->id), $bounce);
             $this->assertSame('manual', ForwardingMarker::type($wire));
             $this->assertStringEndsWith("\r\n", $wire);
             $this->assertStringNotContainsString('emails/', $wire);
             $parsed = (new MailMimeParser)->parse($wire, false);
-            $this->assertSame('shop@sender.test', $parsed->getHeader('From')->getEmail());
-            $this->assertSame('shop@sender.test', $parsed->getHeader('Reply-To')?->getEmail() ?? $parsed->getHeader('From')->getEmail());
+            $this->assertSame('service@mailmm.test', $parsed->getHeader('From')->getEmail());
+            $this->assertSame('shop&sales@sender.test', $parsed->getHeader('Reply-To')?->getEmail());
             $this->assertDoesNotMatchRegularExpression('/^(?:DKIM-Signature|ARC-Message-Signature):/im', $wire);
             $this->assertStringContainsString("Authentication-Results: mx.mailmm.test; none\r\n", $wire);
             $this->assertSame('reader@outside.test', $parsed->getHeader('To')->getEmail());
             $this->assertSame('Receipt', $parsed->getSubject());
-            $this->assertStringContainsString('shop@sender.test', $parsed->getTextContent());
+            $this->assertStringContainsString('shop&sales@sender.test', $parsed->getTextContent());
+            $this->assertStringContainsString('shop&amp;sales@sender.test', $parsed->getHtmlContent());
             $this->assertStringContainsString('Сохранённый текст', $parsed->getTextContent());
             $this->assertStringContainsString('<p><b>Сохранённая вёрстка</b></p>', $parsed->getHtmlContent());
             $this->assertCount(1, $parsed->getAllAttachmentParts());
@@ -178,8 +233,11 @@ class ForwardingDeliveryTest extends TestCase
         $op = $this->operation();
         $this->mock(ForwardingTransport::class)->shouldReceive('send')->once()->andReturnUsing(function ($mode, $message) {
             $wire = $message->toString();
+            $this->assertSame('manual', $mode);
             $this->assertStringNotContainsString('leak@other.test', $wire);
-            $file = (new MailMimeParser)->parse($wire, false)->getAttachmentPart(0);
+            $parsed = (new MailMimeParser)->parse($wire, false);
+            $this->assertSame('service@mailmm.test', $parsed->getHeader('From')->getEmail());
+            $file = $parsed->getAttachmentPart(0);
             $this->assertSame('empty.bin', $file->getFilename());
             $this->assertSame('application/octet-stream', $file->getContentType());
             $this->assertSame('', (string) $file->getBinaryContentStream());
@@ -213,9 +271,9 @@ class ForwardingDeliveryTest extends TestCase
         $this->message->update(['raw_path' => null, 'raw_size' => null, 'raw_sha256' => null, 'from' => $archivedFrom]);
         $mail = (new MailMimeParser)->parse($this->manualWire(), false);
         $this->assertNull($mail->getHeader('Bcc'));
-        $from = $mail->getHeader('From');
-        $this->assertSame('service@mailmm.test', $from->getEmail());
-        $this->assertSame('Исходный отправитель неизвестен', $from->getPersonName());
+        $this->assertSame('service@mailmm.test', $mail->getHeader('From')->getEmail());
+        $this->assertNull($mail->getHeader('Reply-To'));
+        $this->assertStringContainsString('Исходный отправитель неизвестен', $mail->getTextContent());
     }
 
     public function test_manual_forward_with_no_ingress_context_strips_spoofed_authentication(): void
@@ -312,6 +370,7 @@ class ForwardingDeliveryTest extends TestCase
 
     public function test_certain_deferral_queues_once_and_ambiguous_result_never_queues_again(): void
     {
+        $this->freezeSecond();
         $op = $this->operation();
         $relay = $this->mock(ForwardingTransport::class);
         $relay->shouldReceive('send')->once()->andThrow(new ForwardingFailure('smtp_temporary', 'retry'));
@@ -319,6 +378,7 @@ class ForwardingDeliveryTest extends TestCase
         $worker = app(ForwardingDelivery::class);
         $worker->send($op->id);
         $this->assertSame('queued', $op->refresh()->status);
+        $this->assertSame(now()->timestamp + 5, $op->next_attempt_at?->timestamp);
         Queue::assertPushed(SendMailForward::class, 1);
         $worker->send($op->id);
         $this->travelTo($op->next_attempt_at->addSecond());
@@ -326,6 +386,33 @@ class ForwardingDeliveryTest extends TestCase
         $worker->send($op->id);
         $this->assertSame('unknown', $op->fresh()->status);
         Queue::assertPushed(SendMailForward::class, 1);
+    }
+
+    public static function scannerRetryDelays(): array
+    {
+        return [
+            'scanner unavailable' => ['scanner_unavailable', 5],
+            'scanner deferred' => ['scanner_deferred', 60],
+        ];
+    }
+
+    #[DataProvider('scannerRetryDelays')]
+    public function test_scanner_retry_delay_preserves_deferral_and_subsequent_backoff(string $reason, int $firstDelay): void
+    {
+        $this->freezeSecond();
+        $op = $this->operation('auto');
+        $this->mock(ForwardingIngress::class)->shouldReceive('authenticationResults')->twice()
+            ->andThrow(new ForwardingCheckFailed($reason, true));
+        $this->mock(ForwardingTransport::class)->shouldNotReceive('send');
+        $worker = app(ForwardingDelivery::class);
+
+        $worker->send($op->id);
+        $this->assertSame(now()->timestamp + $firstDelay, $op->refresh()->next_attempt_at?->timestamp);
+
+        $this->travelTo($op->next_attempt_at);
+        $worker->send($op->id);
+        $this->assertSame(now()->timestamp + 120, $op->refresh()->next_attempt_at?->timestamp);
+        Queue::assertPushed(SendMailForward::class, 2);
     }
 
     public function test_scheduler_only_reissues_abandoned_preparation(): void
@@ -438,17 +525,51 @@ class ForwardingDeliveryTest extends TestCase
             ['5.7.1', 'smtp_rejected'], ['5.0.0', 'smtp_rejected'], ['5.2.2', 'smtp_rejected']];
     }
 
+    private static function deliveryReport(string $status, string $final = 'reader@outside.test'): string
+    {
+        return "Content-Type: multipart/report; report-type=delivery-status; boundary=q\r\n\r\n--q\r\nContent-Type: text/plain\r\n\r\nFailed\r\n"
+            ."--q\r\nContent-Type: message/delivery-status\r\n\r\nReporting-MTA: dns; mx.example\r\n\r\n"
+            ."Original-Recipient: rfc822; reader@outside.test\r\nFinal-Recipient: rfc822; ".$final."\r\nAction: failed\r\nStatus: ".$status."\r\n\r\n--q--\r\n";
+    }
+
+    public function test_the_inbound_queue_applies_a_delayed_dsn_and_keeps_ordinary_mail_in_a_conflicting_domain(): void
+    {
+        $op = $this->operation();
+        $op->update(['status' => 'accepted']);
+        $recipient = ForwardingFeedback::address($op->id);
+        MailboxDomain::create(['name' => 'bounce.test']);
+        $box = User::factory()->create()->mailbox()->create(['email' => $recipient]);
+        config(['mailbox.mx_host' => 'mx.mailmm.test']);
+        $this->travel(2)->seconds();
+        $received = 'Received: by mx.mailmm.test (Postfix) id ABCDEF; '.now()->format('D, j M Y H:i:s O')."\r\n";
+
+        foreach ([self::deliveryReport('5.1.1'), "From: sender@outside.test\r\nSubject: Ordinary mail\r\n\r\nBody\r\n"] as $raw) {
+            $stream = fopen('php://temp', 'w+b');
+            fwrite($stream, $received.$raw);
+            rewind($stream);
+            $input = new ArrayInput(['command' => 'mail:parse', '--postfix' => true, '--recipient' => $recipient, '--mail-from' => '<>']);
+            $input->setStream($stream);
+            try {
+                $this->assertSame(0, app(Kernel::class)->handle($input, new BufferedOutput));
+            } finally {
+                fclose($stream);
+            }
+        }
+
+        $this->assertSame('bounced', $op->fresh()->status);
+        $this->assertSame('permanent_bounce', $op->fresh()->error_code);
+        $this->assertSame('Ordinary mail', $box->messages()->sole()->subject);
+    }
+
     #[DataProvider('deliveryReports')]
     public function test_dsn_requires_signed_recipient_matching_delivery_status_and_repeats_once(string $status, string $reason, string $final = 'reader@outside.test'): void
     {
         $op = $this->operation('auto');
         $op->update(['status' => 'accepted']);
         $to = ForwardingFeedback::address($op->id);
-        $dsn = "Content-Type: multipart/report; report-type=delivery-status; boundary=q\r\n\r\n--q\r\nContent-Type: text/plain\r\n\r\nFailed\r\n"
-            ."--q\r\nContent-Type: message/delivery-status\r\n\r\nReporting-MTA: dns; mx.example\r\n\r\n"
-            ."Original-Recipient: rfc822; reader@outside.test\r\nFinal-Recipient: rfc822; ".$final."\r\nAction: failed\r\nStatus: ".$status."\r\n\r\n--q--\r\n";
+        $dsn = self::deliveryReport($status, $final);
         $badToken = substr_replace($to, str_contains('123456789abcdef', $to[33]) ? '0' : '1', 33, 1);
-        $this->assertTrue(ForwardingFeedback::receiveDsn($badToken, $dsn));
+        $this->assertFalse(ForwardingFeedback::receiveDsn($badToken, $dsn));
         $this->assertSame('accepted', $op->fresh()->status);
         ForwardingFeedback::receiveDsn($to, str_replace('reader@outside.test', 'other@outside.test', $dsn));
         $this->assertSame('accepted', $op->fresh()->status);

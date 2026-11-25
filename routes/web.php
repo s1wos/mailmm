@@ -37,6 +37,7 @@ Route::prefix('admin')->group(function () {
         Route::get('/messages/{message}/attachments/{index}', [PanelController::class, 'attachment'])
             ->whereNumber(['message', 'index'])->name('panel.attachment');
         Route::post('/messages/{message}/forwards', [ForwardingController::class, 'send'])->whereNumber('message');
+        Route::get('/messages/{message}/forwards', [ForwardingController::class, 'statuses'])->whereNumber('message');
         Route::get('/messages/{message}/forwards/{forward}', [ForwardingController::class, 'status'])
             ->whereNumber('message')->whereUuid('forward');
         Route::prefix('account/forwarding')->middleware('can:change-mailbox-password')->group(function () {

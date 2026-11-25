@@ -8,6 +8,7 @@ export function describeForwardError(code: string) {
         hidden_recipient: 'Оригинал содержит скрытых получателей.',
         message_too_large: 'Размер письма превышает допустимый.',
         transport_unconfigured: 'Сервис исходящей почты пока недоступен.',
+        bounce_domain_conflict: 'Домен уведомлений о доставке уже используется для почтовых ящиков.',
         smtp_unsupported: 'Почтовый сервер не поддерживает формат этого письма.',
         smtp_temporary: 'Почтовый сервер временно недоступен.',
         smtp_rejected: 'Почтовый сервер отклонил письмо.',

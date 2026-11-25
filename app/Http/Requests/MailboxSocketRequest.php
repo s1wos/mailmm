@@ -18,6 +18,7 @@ final class MailboxSocketRequest
 
         return in_array($data['reason'] ?? null, ['manual', 'auto', 'subscribed', 'delivery', 'resume'], true)
             && (! isset($data['snapshot']) || (is_string($data['snapshot']) && strlen($data['snapshot']) <= 100))
+            && (! array_key_exists('delta', $data) || is_bool($data['delta']))
             && (! isset($data['deliveryId']) || (is_int($data['deliveryId']) && $data['deliveryId'] > 0));
     }
 }

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Exceptions\ForwardingFailure;
+use App\Models\MailboxDomain;
 use App\Models\MailboxForwardingRule;
 use App\Models\MailForward;
 use App\Rules\ForwardingAddress;
@@ -21,12 +22,21 @@ final class ForwardingFeedback
     public static function address(string $id): string
     {
         $domain = (string) config('forwarding.bounce_domain');
-        if ($domain === '' || ! filter_var($domain, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) || ! Str::isUuid($id)) {
+        if ($domain === '' || ! Str::isUuid($id)) {
             throw new ForwardingFailure('transport_unconfigured');
         }
+        if (MailboxDomain::where('name', $domain)->exists()) {
+            throw new ForwardingFailure('bounce_domain_conflict');
+        }
+
+        return self::signedAddress($id, $domain);
+    }
+
+    private static function signedAddress(string $id, string $domain): string
+    {
         $mac = substr(hash_hmac('sha256', "forward-bounce\0".$id, config('app.key')), 0, 24);
 
-        return str_replace('-', '', $id).'.'.$mac.'@'.strtolower($domain);
+        return str_replace('-', '', $id).'.'.$mac.'@'.$domain;
     }
 
     /** Called only for the actual envelope RCPT and an empty SMTP reverse path. */
@@ -37,22 +47,22 @@ final class ForwardingFeedback
             return false;
         }
         if (! preg_match('/^([a-f0-9]{8})([a-f0-9]{4})([a-f0-9]{4})([a-f0-9]{4})([a-f0-9]{12})\.[a-f0-9]{24}@/i', $recipient, $parts)) {
-            return true;
+            return false;
         }
         $id = strtolower(implode('-', array_slice($parts, 1)));
-        if (! Str::isUuid($id) || ! hash_equals(self::address($id), strtolower($recipient))) {
-            return true;
+        if (! Str::isUuid($id) || ! hash_equals(self::signedAddress($id, $domain), strtolower($recipient))) {
+            return false;
         }
         $op = MailForward::find($id);
         if (! $op) {
-            return true;
+            return false;
         }
         $report = (new MailMimeParser)->parse($raw, false);
         $status = $report->getChild(1);
         if ($report->getContentType() !== 'multipart/report'
             || ! in_array(strtolower((string) $report->getHeaderParameter('Content-Type', 'report-type')), ['delivery-status', 'global-delivery-status'], true)
             || ! in_array($status?->getContentType(), ['message/delivery-status', 'message/global-delivery-status'], true)) {
-            return true;
+            return false;
         }
         $blocks = preg_split('/\r?\n\r?\n/', (string) $status->getBinaryContentStream());
         $reason = null;
@@ -71,9 +81,10 @@ final class ForwardingFeedback
                 }
             }
         }
-        if ($reason !== null) {
-            self::record($id, $reason);
+        if ($reason === null) {
+            return false;
         }
+        self::record($id, $reason);
 
         return true;
     }

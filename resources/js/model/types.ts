@@ -37,7 +37,7 @@ export interface MessageSummary extends MessageHeader {
 
 export interface MessagePage {
     data: MessageSummary[]
-    meta: { next_cursor: string | null }
+    meta: { next_cursor: string | null, delta?: boolean }
 }
 
 export interface EmailMessage extends MessageHeader {

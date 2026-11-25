@@ -30,6 +30,18 @@ class ForwardingIngress
             || (bool) preg_match('~^Content-Type:[ \t]*(?:message/(?:global-)?delivery-status\b|multipart/report\b[^\r\n]*\breport-type\s*=\s*"?(?:global-)?delivery-status\b)~im', $headers);
     }
 
+    public static function authenticationForRelay(?string $trustedResult): string
+    {
+        $authserv = (string) config('forwarding.authserv_id');
+        if ($trustedResult !== null && str_contains($trustedResult, ';')
+            && strcasecmp(trim(explode(';', $trustedResult, 2)[0]), $authserv) === 0) {
+            return $trustedResult;
+        }
+
+        // Historical evidence belongs to the MX that observed the original SMTP session.
+        return $authserv.'; none';
+    }
+
     public function authenticationResults(Message $message, string $canonicalRaw): string
     {
         $context = $message->forwarding_context;

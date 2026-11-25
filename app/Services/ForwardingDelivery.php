@@ -41,7 +41,8 @@ class ForwardingDelivery
         [$op, $message, $raw] = $claim;
         try {
             if ($op->mode === 'auto') {
-                $mail = ForwardingMime::automatic($raw, $id, $this->ingress->authenticationResults($message, $raw));
+                $authentication = $this->ingress->authenticationResults($message, $raw);
+                $mail = ForwardingMime::automatic($raw, $id, ForwardingIngress::authenticationForRelay($authentication));
             } else {
                 $context = $message->forwarding_context;
                 if (isset($context['blocked_reason'])) {
@@ -57,7 +58,7 @@ class ForwardingDelivery
                 // Reconstructed bodies and historical SMTP sessions cannot attest to the original author's authentication.
                 $authentication = $raw !== null ? ($context['authentication_results'] ?? null) : null;
                 $mail = ForwardingMime::manual($raw ?? ForwardingArchive::mime($message, $id, $op->destination),
-                    $id, $authentication ?? config('forwarding.authserv_id').'; none');
+                    $id, ForwardingIngress::authenticationForRelay($authentication));
             }
             $sender = ForwardingFeedback::address($id);
         } catch (ForwardingCheckFailed $failure) {
@@ -76,7 +77,9 @@ class ForwardingDelivery
             return;
         }
         try {
-            $this->transport->send('auto', $mail, $op->destination, $sender);
+            // The manual relay DKIM-signs MailMM's own messages. The auto relay ARC-seals forwarded originals.
+            $profile = $raw === null ? 'manual' : 'auto';
+            $this->transport->send($profile, $mail, $op->destination, $sender);
             $result = null;
         } catch (ForwardingFailure $failure) {
             $result = $failure;
@@ -197,7 +200,9 @@ class ForwardingDelivery
                 $status = 'failed';
             }
             if ($status === 'retry') {
-                $next = now()->startOfSecond()->addSeconds(min(3600, 60 * (2 ** min($op->attempts - 1, 6))));
+                $delay = $op->attempts === 1 && in_array($reason, ['scanner_unavailable', 'smtp_temporary'], true)
+                    ? 5 : min(3600, 60 * (2 ** min($op->attempts - 1, 6)));
+                $next = now()->startOfSecond()->addSeconds($delay);
                 if ($next->gte($op->created_at->copy()->addDay())) {
                     $status = 'failed';
                     $reason = 'delivery_expired';

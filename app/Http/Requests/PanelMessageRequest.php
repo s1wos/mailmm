@@ -14,8 +14,12 @@ class PanelMessageRequest extends FormRequest
     public function rules(): array
     {
         $recipient = $this->query('recipient');
+        $cursor = $this->query('cursor');
 
-        // An invalid optional filter is omitted from the return link.
-        return ['recipient' => is_string($recipient) && strlen($recipient) <= 254 ? ['string'] : ['exclude']];
+        // Omit invalid optional parameters from the return link.
+        return [
+            'recipient' => is_string($recipient) && strlen($recipient) <= 254 ? ['string'] : ['exclude'],
+            'cursor' => is_string($cursor) && strlen($cursor) <= 2048 ? ['string'] : ['exclude'],
+        ];
     }
 }

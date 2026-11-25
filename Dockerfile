@@ -8,8 +8,11 @@ RUN npm run build
 
 FROM php:8.4-fpm-bookworm AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libpq-dev unzip \
+    && apt-get install -y --no-install-recommends libpq-dev libuv1-dev unzip \
     && docker-php-ext-install -j"$(nproc)" pdo_pgsql pcntl \
+    && pecl install uv-0.3.1 \
+    && docker-php-ext-enable uv \
+    && rm -rf /tmp/pear \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer
 WORKDIR /var/www
@@ -36,6 +39,7 @@ COPY deploy/postfix/start.sh /usr/local/bin/mailmm-postfix
 ENTRYPOINT ["sh", "/usr/local/bin/mailmm-postfix"]
 
 FROM nginx:stable-alpine AS web
+COPY nginx/nginx.conf /etc/nginx/nginx.conf
 COPY nginx/conf.d/default.conf /etc/nginx/conf.d/default.conf
 COPY nginx/upstreams.conf /etc/nginx/conf.d/mailmm-upstreams.conf
 COPY nginx/mailmm-locations.conf /etc/nginx/mailmm/locations.conf

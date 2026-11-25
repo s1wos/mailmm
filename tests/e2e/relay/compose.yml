@@ -1,0 +1,61 @@
+services:
+  db:
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
+
+  app:
+    volumes:
+      - ./tests/e2e/relay/queue-copies.php:/relay-queue-copies.php:ro
+
+  forward-worker:
+    environment:
+      SSL_CERT_FILE: /relay-certs/live/mailmm/fullchain.pem
+    volumes:
+      - certificates:/relay-certs:ro
+
+  outbound:
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        postconf -e 'relayhost = [relay-sink]:2525' 'smtp_host_lookup = native' 'smtp_dns_support_level = disabled'
+        exec sh /etc/mailmm-forwarding/postfix.sh
+
+  relay-material:
+    image: ${COMPOSE_PROJECT_NAME}-smtp:${MAILMM_TAG:-local}
+    network_mode: none
+    volumes:
+      - certificates:/relay-certs
+      - relay-keys:/relay-keys
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        dir=/relay-certs/live/mailmm
+        mkdir -p "$$dir"
+        openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=mx.relay.test' \
+          -addext 'subjectAltName=DNS:mx.relay.test' -keyout "$$dir/privkey.pem" -out "$$dir/fullchain.pem"
+        for profile in dkim arc; do
+          key="/relay-keys/$$profile.key"
+          openssl genrsa -traditional -out "$$key" 2048
+          chgrp 11333 "$$key"
+          chmod 0640 "$$key"
+          openssl pkey -in "$$key" -pubout
+        done
+
+  relay-sink:
+    image: ${COMPOSE_PROJECT_NAME}-app:${MAILMM_TAG:-local}
+    networks:
+      submission:
+        ipv4_address: 172.29.252.4
+    volumes:
+      - ./tests/e2e/relay/sink.php:/relay-sink.php:ro
+    command: ["php", "/relay-sink.php"]
+
+networks:
+  default:
+    internal: true
+  submission:
+    internal: true
+
+volumes:
+  relay-keys:

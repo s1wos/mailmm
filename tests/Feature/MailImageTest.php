@@ -30,10 +30,12 @@ class MailImageTest extends TestCase
         $box = $owner->mailbox()->create(['email' => $owner->email]);
         $message = $box->messages()->create(['recipient' => $box->email, 'from' => 'shop@example.test', 'received_at' => now(), 'body_html' => '<img src="'.$url.'">']);
         $bytes = base64_decode('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==');
-        $this->mock(RemoteMailImage::class)->shouldReceive('fetch')->once()->with($url)->andReturnUsing(function () use ($bytes) {
+        $this->mock(RemoteMailImage::class)->shouldReceive('fetch')->once()->with($url)->andReturnUsing(function () use ($bytes, $url) {
             $lock = Cache::lock('session:'.request()->session()->getId(), 1);
             self::assertTrue($lock->get(), 'An image fetch must leave the mailbox session available to concurrent page requests.');
             $lock->release();
+            $slot = 'mail-image:'.(hexdec(substr(hash('sha256', $url), 0, 2)) % 64);
+            self::assertFalse(Cache::store('file')->lock($slot.':fill', 1)->get(), 'Only the cache slot owner may fetch a missing image.');
 
             return ['mime' => 'image/gif', 'bytes' => $bytes];
         });

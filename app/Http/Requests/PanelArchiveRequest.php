@@ -8,6 +8,9 @@ class PanelArchiveRequest extends FormRequest
 {
     public function rules(): array
     {
-        return $this->wantsJson() ? ['recipient' => ['nullable', 'string', 'max:254']] : [];
+        return $this->wantsJson() ? [
+            'recipient' => ['nullable', 'string', 'max:254'],
+            'cursor' => ['nullable', 'string', 'max:2048'],
+        ] : [];
     }
 }

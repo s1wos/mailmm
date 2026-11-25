@@ -31,6 +31,7 @@ export const test = base.extend({
                 FORWARD_MANUAL_DSN: 'smtp://127.0.0.1:10252', FORWARD_AUTO_DSN: 'smtp://127.0.0.1:10253',
                 FORWARD_SERVICE_ADDRESS: 'service@out.test', FORWARD_BOUNCE_DOMAIN: 'bounce.test',
                 FORWARD_SCANNER_URL: 'http://forward-worker:10254/checkv2',
+                FORWARD_TOTAL: '1000',
             }),
         }
         const compose = (args, options) => execFileSync('docker', [
@@ -76,6 +77,7 @@ export const test = base.extend({
                 closeMailbox: email => sql("UPDATE emails SET closed_at = now() WHERE email = :'recipient'", ['-v', 'recipient=' + email]),
                 resetTestData: () => sql(`BEGIN;
                     DELETE FROM messages;
+                    DELETE FROM forwarding_quota_buckets;
                     DELETE FROM cache WHERE key LIKE '%guest-mailbox-issue:%' OR key LIKE '%panel-login:%';
                     COMMIT;`),
                 stopRealtime: () => compose(['stop', '-t', '3', 'reverb']),

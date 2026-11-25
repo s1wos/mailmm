@@ -73,6 +73,29 @@ class ContainerErrorParserTest extends TestCase
         self::assertLessThanOrEqual(8192, strlen($record['message']));
     }
 
+    public function test_postfix_error_masks_envelope_addresses_and_address_in_remote_diagnostic(): void
+    {
+        $record = ContainerErrorParser::parse('smtp', 'Nov 21 21:00:00 mx postfix/pipe[123]: '
+            .'ABC123: to=<receiver@unit.test>, orig_to=<"исходный адрес"@unit.test>, from=<sender+tag@unit.test>, '
+            .'relay=mailmm, dsn=5.3.0, status=bounced (No mailbox receiver@unit.test)');
+
+        self::assertNotNull($record);
+        self::assertSame('error', $record['level']);
+        self::assertStringContainsString('ABC123: to=<[redacted]>, orig_to=<[redacted]>, from=<[redacted]>', $record['message']);
+        self::assertStringContainsString('dsn=5.3.0, status=bounced (No mailbox [redacted])', $record['message']);
+    }
+
+    public function test_postfix_error_masks_unicode_symbols_in_unquoted_addresses(): void
+    {
+        $space = "\u{00a0}";
+        $record = ContainerErrorParser::parse('smtp', 'Nov 21 21:00:00 mx postfix/pipe[123]: '
+            .'ABC123: to=<☃💌@unit.test>, from=<sender★箱@unit.test>, '
+            ."relay=mailmm, dsn=5.3.0, status=bounced (No mailbox{$space}☃💌@unit.test)");
+
+        self::assertSame('postfix/pipe: ABC123: to=<[redacted]>, from=<[redacted]>, '
+            ."relay=mailmm, dsn=5.3.0, status=bounced (No mailbox{$space}[redacted])", $record['message'] ?? null);
+    }
+
     public function test_sql_bindings_and_postgres_row_details_do_not_reach_the_panel(): void
     {
         foreach ([

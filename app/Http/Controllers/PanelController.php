@@ -21,6 +21,7 @@ use App\Services\MailboxDomainCatalog;
 use App\Services\MailboxIssuance;
 use App\Services\MailboxNotifications;
 use App\Services\MailDashboard;
+use App\Services\PanelArchivePage;
 use App\Services\PanelMessages;
 use App\Services\SitePresence;
 use Illuminate\Contracts\View\View;
@@ -68,31 +69,12 @@ class PanelController extends Controller
     {
         $user = $request->user();
         $recipient = $request->validated('recipient') ?? '';
-        $query = PanelMessages::for($user);
-        $listQuery = [];
-        if ($user->is_admin && $recipient !== '') {
-            $query->where('recipient', Str::lower($recipient));
-            $listQuery['recipient'] = $recipient;
-        }
-        $summary = (clone $query)->selectRaw('count(*) as total, min(received_at) as received_at')->first();
-        $messages = $query->latest('received_at')->latest('id')
-            ->paginate(25, ['id', 'recipient', 'from', 'subject', 'received_at'], total: (int) $summary->total)
-            ->through(fn (Message $letter) => $letter->panelSummary())
-            ->withPath(route($user->is_admin ? 'panel.archive' : 'panel.index', absolute: false))
-            ->appends($listQuery);
-
-        if ($messages->currentPage() > 1) {
-            $listQuery['page'] = $messages->currentPage();
-        }
 
         return [
             'serverTime' => now()->toISOString(),
-            'nextExpiryAt' => $summary->received_at ? Message::expiresAt($summary->received_at)->toISOString() : null,
-            'messages' => $this->page($messages),
             'recipient' => $recipient,
-            'listQuery' => (object) $listQuery,
             'forwarding' => ForwardingRules::forPanel($user),
-        ];
+        ] + PanelArchivePage::for($user, $recipient, $request->integer('page', 1, strict: true), $request->validated('cursor'));
     }
 
     public function mailboxes(PanelMailboxesRequest $request): View|JsonResponse
@@ -249,6 +231,9 @@ class PanelController extends Controller
         }
         if (! $overview && $request->integer('page') > 1) {
             $parameters['page'] = $request->integer('page');
+        }
+        if (! $overview && $request->validated('cursor') !== null) {
+            $parameters['cursor'] = $request->validated('cursor');
         }
         $attachments = [];
         foreach ($letter->attachments ?? [] as $index => $file) {

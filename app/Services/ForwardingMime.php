@@ -76,6 +76,7 @@ final class ForwardingMime
                         if ($name === 'arc-message-signature') {
                             $discardArc = true;
                         }
+
                         continue;
                     }
                 }
@@ -171,7 +172,7 @@ final class ForwardingMime
     {
         $id = (string) Str::uuid();
         $body = 'Код подтверждения пересылки MailMM: '.$code."\r\n";
-        $headers = self::newHeaders($id, $to, null, 'Код подтверждения пересылки MailMM', 'MailMM');
+        $headers = self::serviceHeaders($id, $to, 'Код подтверждения пересылки MailMM');
         $headers->addMailboxListHeader('Reply-To', [new Address(config('forwarding.service_address'))]);
         $headers->addTextHeader('MIME-Version', '1.0');
         $headers->addTextHeader('Content-Type', 'text/plain; charset=UTF-8');
@@ -181,7 +182,7 @@ final class ForwardingMime
         return new RawMessage($headers->toString()."\r\n".$body);
     }
 
-    public static function newHeaders(string $id, string $to, ?string $author, string $subject, string $fallbackName): Headers
+    public static function serviceHeaders(string $id, string $to, string $subject): Headers
     {
         $service = config('forwarding.service_address');
         if (! ForwardingAddress::valid($service)) {
@@ -191,8 +192,7 @@ final class ForwardingMime
             throw new ForwardingFailure('invalid_recipient');
         }
         $headers = new Headers;
-        $address = ForwardingAddress::normalize($author);
-        $headers->addMailboxListHeader('From', [$address === null ? new Address($service, $fallbackName) : new Address($address)]);
+        $headers->addMailboxListHeader('From', [new Address($service, 'MailMM')]);
         $headers->addMailboxListHeader('To', [new Address($to)]);
         $headers->addDateHeader('Date', now());
         $headers->addIdHeader('Message-ID', $id.'@'.Str::afterLast($service, '@'));

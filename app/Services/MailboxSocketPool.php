@@ -5,21 +5,22 @@ namespace App\Services;
 use Closure;
 use React\EventLoop\Loop;
 use React\EventLoop\TimerInterface;
-use Symfony\Component\Process\Exception\ProcessTimedOutException;
-use Symfony\Component\Process\Process;
 use Throwable;
 
 class MailboxSocketPool
 {
     private const WORKERS = 4;
 
-    private const QUEUE = 12;
+    private const QUEUE = 1024;
 
     private const TIMEOUT = 8;
 
     private array $waiting = [];
 
     private array $running = [];
+
+    /** @var list<MailboxSocketWorker> */
+    private array $idle = [];
 
     private ?TimerInterface $timer = null;
 
@@ -30,44 +31,46 @@ class MailboxSocketPool
 
             return;
         }
-        $this->waiting[] = [$job, $complete, microtime(true) + self::TIMEOUT];
-        $this->timer ??= Loop::addPeriodicTimer(0.02, $this->advance(...));
+        $this->waiting[] = [$job, $complete, hrtime(true) / 1e9 + self::TIMEOUT];
+        $this->timer ??= Loop::addPeriodicTimer(0.01, $this->advance(...));
     }
 
     private function advance(): void
     {
-        foreach ($this->running as $index => [$process, $complete]) {
+        foreach ($this->running as $index => [$worker, $complete, $deadline]) {
             try {
-                $process->checkTimeout();
-                if ($process->isRunning()) {
-                    continue;
+                if ($deadline <= hrtime(true) / 1e9) {
+                    $worker->close();
+                    $result = ['code' => 'timeout'];
+                } else {
+                    $result = $worker->read();
+                    if ($result === null) {
+                        continue;
+                    }
+                    $this->idle[] = $worker;
                 }
-                $output = $process->getOutput();
-                $result = $process->isSuccessful() && strlen($output) <= 1048576
-                    ? json_decode($output, true, flags: JSON_THROW_ON_ERROR) : null;
-            } catch (ProcessTimedOutException) {
-                $result = ['code' => 'timeout'];
             } catch (Throwable) {
-                $result = null;
+                $worker->close();
+                $result = ['code' => 'unavailable'];
             }
             unset($this->running[$index]);
-            $complete(is_array($result) ? $result : ['code' => 'unavailable']);
+            $complete($result);
         }
         while ($this->waiting && count($this->running) < self::WORKERS) {
             [$job, $complete, $deadline] = array_shift($this->waiting);
-            $remaining = $deadline - microtime(true);
-            if ($remaining <= 0) {
+            if ($deadline <= hrtime(true) / 1e9) {
                 $complete(['code' => 'busy']);
 
                 continue;
             }
+            $worker = null;
             try {
-                $process = new Process([PHP_BINARY, base_path('artisan'), 'mail:socket-read', '--no-ansi'], base_path());
-                $process->setInput(json_encode($job, JSON_THROW_ON_ERROR));
-                $process->setTimeout($remaining);
-                $process->start();
-                $this->running[] = [$process, $complete];
+                $input = json_encode($job, JSON_THROW_ON_ERROR);
+                $worker = $this->takeWorker();
+                $worker->send($input);
+                $this->running[] = [$worker, $complete, $deadline];
             } catch (Throwable) {
+                $worker?->close();
                 $complete(['code' => 'unavailable']);
             }
         }
@@ -75,5 +78,17 @@ class MailboxSocketPool
             Loop::cancelTimer($this->timer);
             $this->timer = null;
         }
+    }
+
+    private function takeWorker(): MailboxSocketWorker
+    {
+        while ($worker = array_pop($this->idle)) {
+            if ($worker->isRunning()) {
+                return $worker;
+            }
+            $worker->close();
+        }
+
+        return new MailboxSocketWorker;
     }
 }

@@ -15,6 +15,43 @@ class CollectContainerErrorsTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->travelTo('2026-01-01 12:00:00 UTC');
+    }
+
+    public function test_pruning_expires_old_records_and_masks_existing_smtp_diagnostics(): void
+    {
+        $entries = DB::table('admin_error_logs');
+        $cutoff = now()->subDays(30);
+        $metadata = ['level' => 'error', 'service' => 'smtp', 'message' => 'ABC123: to=<reader@unit.test>'];
+        $entries->insert([
+            $metadata + ['event_key' => 'expired', 'occurred_at' => $cutoff->format('Y-m-d H:i:s.uP')],
+            $metadata + ['event_key' => 'retained', 'occurred_at' => $cutoff->addMicrosecond()->format('Y-m-d H:i:s.uP')],
+        ]);
+
+        $this->artisan('logs:prune')->assertSuccessful();
+
+        $this->assertDatabaseMissing('admin_error_logs', ['event_key' => 'expired']);
+        $this->assertDatabaseHas('admin_error_logs', ['event_key' => 'retained', 'message' => 'ABC123: to=<[redacted]>']);
+    }
+
+    public function test_replaying_docker_logs_cannot_restore_expired_records(): void
+    {
+        $stream = $this->frame('2025-12-02T12:00:00.000000000Z [2025-12-02 12:00:00] production.ERROR: Expired')
+            .$this->frame('2025-12-02T12:00:00.000001000Z [2025-12-02 12:00:00] production.ERROR: Retained');
+        Http::fake([
+            '*/containers' => Http::response([$this->container()]),
+            '*/logs/worker/1?*' => Http::response($stream),
+        ]);
+
+        $this->artisan('logs:collect --once')->assertSuccessful();
+
+        $this->assertDatabaseCount('admin_error_logs', 1);
+        $this->assertDatabaseHas('admin_error_logs', ['message' => 'Retained']);
+    }
+
     public function test_panel_reports_a_stalled_reader_and_preserves_the_last_successful_check(): void
     {
         $this->actingAs(User::factory()->create(['is_admin' => true]));
@@ -74,7 +111,8 @@ class CollectContainerErrorsTest extends TestCase
         $this->artisan('logs:collect --once')->assertFailed();
         $this->artisan('logs:collect --once')->assertSuccessful();
         $this->assertDatabaseCount('admin_error_logs', 1);
-        $this->assertSame(2, Http::recorded(fn ($request) => str_contains($request->url(), 'since=0&'))->count());
+        $since = now()->subDays(30)->timestamp;
+        $this->assertSame(2, Http::recorded(fn ($request) => str_contains($request->url(), "since=$since&"))->count());
     }
 
     public function test_follow_reports_a_write_in_progress_until_the_error_is_stored(): void
